@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------------------------------------------------------------- constants
 
-SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
+SCHEMES = ("vless://", "vmess://", "trojan://")
 CURL = "curl.exe" if os.name == "nt" else "curl"
 FLAG_GEMINI = "\u264a"                      # ♊
 FLAG_BELIZE = "\U0001f1e7\U0001f1ff"        # 🇧🇿 — makes US sort to top in clients
@@ -118,6 +118,8 @@ def parse_vless(link):
     addr, port = split_host_port(hp)
     p = parse_params(query)
     net = p.get("type", "tcp")
+    if net in ("h2", "http"):
+        net = "http"
     sec = p.get("security", "none")
     sni = p.get("sni") or addr
     fp = p.get("fp", "chrome")
@@ -148,13 +150,18 @@ def parse_vless(link):
             ws["headers"]["Host"] = p["host"]
         ss["wsSettings"] = ws
     elif net == "grpc":
-        ss["grpcSettings"] = {"serviceName": p.get("serviceName", path).lstrip("/"),
+        ss["grpcSettings"] = {"serviceName": p.get("servicename", path).lstrip("/"),
                               "multiMode": False}
     elif net == "httpupgrade":
         hu = {"path": path}
         if p.get("host"):
             hu["host"] = p["host"]
         ss["httpupgradeSettings"] = hu
+    elif net == "http":
+        hs = {"path": path}
+        if p.get("host"):
+            hs["host"] = [p["host"]]
+        ss["httpSettings"] = hs
     return outbound
 
 
@@ -168,6 +175,8 @@ def parse_vmess(link):
         return None
     port = int(obj.get("port", 443))
     net = obj.get("net") or "tcp"
+    if net in ("h2", "http"):
+        net = "http"
     sec = obj.get("tls") or "none"
 
     outbound = {
@@ -190,6 +199,11 @@ def parse_vmess(link):
     elif net == "grpc":
         ss["grpcSettings"] = {"serviceName": (obj.get("path") or "").lstrip("/"),
                               "multiMode": False}
+    elif net == "http":
+        hs = {"path": obj.get("path") or "/"}
+        if obj.get("host"):
+            hs["host"] = [obj["host"]]
+        ss["httpSettings"] = hs
     return outbound
 
 
@@ -203,6 +217,8 @@ def parse_trojan(link):
     p = parse_params(query)
     sni = p.get("sni") or addr
     net = p.get("type", "tcp")
+    if net in ("h2", "http"):
+        net = "http"
 
     outbound = {
         "tag": "proxy",
@@ -218,45 +234,16 @@ def parse_trojan(link):
         if p.get("host"):
             ws["headers"]["Host"] = p["host"]
         outbound["streamSettings"]["wsSettings"] = ws
+    elif net == "http":
+        hs = {"path": p.get("path", "/")}
+        if p.get("host"):
+            hs["host"] = [p["host"]]
+        outbound["streamSettings"]["httpSettings"] = hs
     return outbound
 
 
-def parse_ss(link):
-    raw = link[5:]
-    if "#" in raw:
-        raw = raw.split("#", 1)[0]
-    if "?" in raw:  # drop plugin params
-        raw = raw.split("?", 1)[0]
-    try:
-        if "@" in raw:  # SIP002: base64(method:pass)@host:port
-            userinfo, hostport = raw.rsplit("@", 1)
-            host, port = split_host_port(hostport)
-            try:
-                ui = b64_decode(userinfo)
-            except Exception:
-                ui = urllib.parse.unquote(userinfo)
-            method, _, password = ui.partition(":")
-        else:  # legacy: whole link base64
-            dec = b64_decode(raw)
-            userinfo, _, hostport = dec.rpartition("@")
-            if not userinfo:
-                return None
-            method, _, password = userinfo.partition(":")
-            host, port = split_host_port(hostport)
-        if not password or not method:
-            return None
-        return {
-            "tag": "proxy",
-            "protocol": "shadowsocks",
-            "settings": {"servers": [{"address": host, "port": port,
-                                      "method": method, "password": password}]},
-        }
-    except Exception:
-        return None
-
-
 PARSERS = {"vless://": parse_vless, "vmess://": parse_vmess,
-           "trojan://": parse_trojan, "ss://": parse_ss}
+           "trojan://": parse_trojan}
 
 
 def link_outbound(link):
@@ -333,10 +320,10 @@ def fetch_url(url, timeout=25):
 
 
 def content_to_links(content):
-    if not re.search(r"(vless|vmess|trojan|ss)://", content):
+    if not re.search(r"(vless|vmess|trojan)://", content):
         try:
             dec = b64_decode("".join(content.split()))
-            if re.search(r"(vless|vmess|trojan|ss)://", dec):
+            if re.search(r"(vless|vmess|trojan)://", dec):
                 content = dec
         except Exception:
             pass
@@ -529,7 +516,7 @@ def main():
     max_latency = int(settings.get("max_latency_ms", 5000))
     gemini_timeout = int(settings.get("gemini_timeout_s", 6))
     base_port = int(settings.get("base_port", 28100))
-    max_configs = args.max_configs or int(settings.get("max_configs", 6000))
+    max_configs = args.max_configs or int(settings.get("max_configs", 20000))
     budget_min = float(settings.get("runtime_budget_min", 90))
     include_alive = bool(settings.get("include_alive_no_gemini", True))
 
