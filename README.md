@@ -12,6 +12,7 @@ Eternal-Sub/
 ├── settings.json                      ← تنظیمات + لیست ساب‌ها (بدون توکن)
 ├── Github-Gemini.txt                  ← خروجی: ساب base64 (ساخته‌شده توسط Actions)
 ├── Github-Gemini-plain.txt            ← خروجی: لیست خام برای دیباگ
+├── REPORT.md                          ← گزارش آخرین اجرا (جدول به‌تفکیک هر ساب)
 └── .github/workflows/gemini-builder.yml
 ```
 
@@ -22,7 +23,7 @@ Eternal-Sub/
 
 ## چطور کار می‌کند
 
-1. هر روز ساعت ۱۰ صبح به وقت تهران (۰۶:۳۰ UTC) یا با اجرای دستی (workflow_dispatch) اجرا می‌شود.
+1. هر روز ساعت ۹ صبح به وقت تهران (۰۵:۳۰ UTC) یا با اجرای دستی (workflow_dispatch) اجرا می‌شود.
 2. Xray-core آخرین نسخه دانلود می‌شود.
 3. `tester.py` ساب‌ها را دانلود، تکراری‌ها را حذف، و همه را موازی تست می‌کند:
    - پینگ و لوکیشن با `cloudflare.com/cdn-cgi/trace`
