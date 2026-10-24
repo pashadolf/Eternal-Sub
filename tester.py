@@ -355,20 +355,20 @@ def download_subs(urls):
             else:
                 tprint(f"    [!] download failed: {url} ({err})")
 
-    seen, items, stats, order = {}, [], {}, []
+    seen, items, order = {}, [], []
     for url in urls:
         if url not in contents:
             continue
         links = content_to_links(contents[url])
         st = {"url": url, "fetched": len(links), "unique": 0,
-              "ping": 0, "gemini": 0}
+              "alive": 0, "gemini": 0}
         order.append(st)
         for i, raw in enumerate(links):
             sig = dedup_signature(raw)
             if sig in seen:
                 continue
             seen[sig] = True
-            items.append({"raw": raw,
+            items.append({"raw": raw, "sub": url,
                           "name": link_remark(raw, f"node_{len(items) + 1}")})
             st["unique"] += 1
     return items, order
@@ -378,16 +378,17 @@ def load_local_configs(path):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
     links = content_to_links(content)
+    label = f"local:{os.path.basename(path)}"
     seen, items = {}, []
     for raw in links:
         sig = dedup_signature(raw)
         if sig in seen:
             continue
         seen[sig] = True
-        items.append({"raw": raw,
+        items.append({"raw": raw, "sub": label,
                       "name": link_remark(raw, f"node_{len(items) + 1}")})
-    return items, [{"url": f"local:{os.path.basename(path)}", "fetched": len(links),
-                    "unique": len(items), "ping": 0, "gemini": 0}]
+    return items, [{"url": label, "fetched": len(links),
+                    "unique": len(items), "alive": 0, "gemini": 0}]
 
 
 # ---------------------------------------------------------------- testing
@@ -489,6 +490,86 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
             os.remove(cfg_path)
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------- report
+
+def sub_short_name(url):
+    m = re.search(r"github(?:usercontent)?\.com/([^/]+)/", url)
+    owner = (m.group(1) + "/") if m else ""
+    tail = [p for p in url.rstrip("/").split("/") if p]
+    return (owner + (tail[-1] if tail else ""))[:42]
+
+
+def write_report(path, sub_stats, results, gemini_ok, in_sub, started, prefix):
+    from collections import Counter
+
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    run_link = (f"https://github.com/{repo}/actions/runs/{run_id}"
+                if repo and run_id else "_local run_")
+    xray_ver = os.environ.get("XRAY_VERSION", "n/a")
+    alive = sum(1 for r in results if r["alive"])
+    cc = Counter(r["loc"] for r in gemini_ok)
+
+    lines = ["# Github-Gemini — Build Report", ""]
+    lines.append(f"- **Run:** {run_link}")
+    lines.append(f"- **Date (UTC):** {time.strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"- **Duration:** {int((time.time() - started) / 60)} min")
+    lines.append(f"- **Xray core:** {xray_ver}")
+    lines.append(f"- **Tested:** {len(results)} configs — **alive:** {alive} — "
+                 f"**Gemini-OK:** {len(gemini_ok)} — **in sub:** {in_sub}")
+    lines += ["", "## Gemini-OK by country", ""]
+    if cc:
+        lines += ["| Country | Gemini-OK |", "|---|---|"]
+        for c, n in cc.most_common():
+            lines.append(f"| {c} {flag_of(c)} | {n} |")
+    else:
+        lines.append("_none_")
+    lines += ["", "## Per-subscription performance", "",
+              "| # | Subscription | Fetched | Unique | Alive | Gemini OK |",
+              "|---|---|---|---|---|---|"]
+    for i, st in enumerate(sub_stats, 1):
+        lines.append(f"| {i} | {sub_short_name(st['url'])} | {st['fetched']} | "
+                     f"{st['unique']} | {st['alive']} | {st['gemini']} |")
+    tot = {k: sum(s[k] for s in sub_stats)
+           for k in ("fetched", "unique", "alive", "gemini")}
+    lines.append(f"| | **TOTAL** | **{tot['fetched']}** | **{tot['unique']}** | "
+                 f"**{tot['alive']}** | **{tot['gemini']}** |")
+    if repo:
+        lines += ["", f"**Subscription:** https://raw.githubusercontent.com/"
+                      f"{repo}/main/{prefix}.txt"]
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
+def git_commit_outputs(prefix):
+    """On GitHub Actions, commit and push the generated files. Returns True if
+    the remote ended up up-to-date (so the workflow's own commit step no-ops)."""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return False
+
+    def git(*args):
+        return subprocess.run(["git", *args], capture_output=True, text=True)
+
+    files = [f"{prefix}.txt", f"{prefix}-plain.txt", "REPORT.md"]
+    git("add", *files)
+    if git("diff", "--cached", "--quiet").returncode == 0:
+        print("[i] outputs identical to previous run - nothing to commit")
+        return True
+    msg = (f"[skip ci] update Github-Gemini sub + report "
+           f"({time.strftime('%Y-%m-%d %H:%M')} UTC)")
+    git("-c", "user.name=github-actions[bot]",
+        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+        "commit", "-m", msg)
+    git("pull", "--rebase", "--autostash")
+    p = git("push")
+    if p.returncode == 0:
+        return True
+    print(f"[!] git push failed, leaving changes staged for the workflow "
+          f"step: {(p.stderr or '').strip()[:200]}")
+    git("reset", "--soft", "HEAD~1")
+    return False
 
 
 # ---------------------------------------------------------------- main
@@ -613,16 +694,39 @@ def main():
                                            + strip_old_prefix(r["name"])))
 
     # per-sub stats
+    by_sub = {st["url"]: st for st in sub_stats}
+    for r in results:
+        st = by_sub.get(r.get("sub"))
+        if not st:
+            continue
+        if r["alive"]:
+            st["alive"] += 1
+            if r["gemini"]:
+                st["gemini"] += 1
+
     print()
-    print("=" * 70)
-    print("  PER-SUBSCRIPTION REPORT")
-    print("=" * 70)
+    print("=" * 80)
+    print("  PER-SUBSCRIPTION PERFORMANCE REPORT")
+    print("=" * 80)
     alive_count = sum(1 for r in results if r["alive"])
     print(f"  tested={len(results)}  alive={alive_count}  "
           f"gemini_ok={len(gemini_ok)}  in_sub={len(final_links)}")
-    for st in sub_stats:
-        print(f"    {st['url'][:66]:<66} fetched={st['fetched']:<5} "
-              f"unique={st['unique']:<5}")
+    print(f"  {'#':<3} {'subscription':<42} {'fetched':>7} {'unique':>7} "
+          f"{'alive':>6} {'gemini':>6}")
+    print("  " + "-" * 78)
+    for i, st in enumerate(sub_stats, 1):
+        print(f"  {i:<3} {sub_short_name(st['url']):<42} {st['fetched']:>7} "
+              f"{st['unique']:>7} {st['alive']:>6} {st['gemini']:>6}")
+    tot = {k: sum(s[k] for s in sub_stats)
+           for k in ("fetched", "unique", "alive", "gemini")}
+    print("  " + "-" * 78)
+    print(f"  {'ALL':<3} {'OVERALL TOTALS':<42} {tot['fetched']:>7} "
+          f"{tot['unique']:>7} {tot['alive']:>6} {tot['gemini']:>6}")
+    from collections import Counter
+    cc = Counter(r["loc"] for r in gemini_ok)
+    if cc:
+        print("  Gemini-OK by country: " + "  ".join(
+            f"{c}:{n}" for c, n in cc.most_common()))
 
     # 5. write outputs (UTF-8, no BOM, LF)
     if final_links:
@@ -637,6 +741,12 @@ def main():
         print(f"[+] wrote {len(final_links)} configs:")
         print(f"    {b64_file}")
         print(f"    {plain}")
+        report_path = os.path.abspath("REPORT.md")
+        write_report(report_path, sub_stats, results, gemini_ok,
+                     len(final_links), started, args.out_prefix)
+        print(f"    {report_path}")
+        if git_commit_outputs(args.out_prefix):
+            print("[+] outputs committed to the repository")
         repo = os.environ.get("GITHUB_REPOSITORY")
         if repo:
             print(f"    sub link: https://raw.githubusercontent.com/{repo}/main/{args.out_prefix}.txt")
