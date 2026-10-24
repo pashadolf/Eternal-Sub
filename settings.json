@@ -3,10 +3,10 @@
   "base_port": 28100,
   "max_latency_ms": 5000,
   "gemini_timeout_s": 6,
-  "max_configs": 6000,
+  "max_configs": 20000,
   "runtime_budget_min": 90,
   "include_alive_no_gemini": true,
-  "allowed_countries": ["US", "DE", "NL", "CA", "GB", "FR", "TR", "AE", "CH", "NO", "SG"],
+  "allowed_countries": ["US", "DE", "FR", "NL", "GB", "CH", "NO", "TR", "AE", "SG"],
   "subscription_urls": [
     "https://raw.githubusercontent.com/pourih/pfs-servers-list/refs/heads/main/verified.txt",
     "https://github.com/miladtahanian/V2RayCFGDumper/raw/refs/heads/main/sub.txt",
