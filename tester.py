@@ -649,6 +649,10 @@ def write_report(path, sub_stats, summary, gemini_ok, started, prefix):
                  f"**{s['gemini_in_sub']}** \u264aGemini + "
                  f"**{s['alive_in_sub']}** alive-only "
                  f"(allowed country, no Gemini, passed quality)")
+    if s.get("alive_excluded"):
+        lines.append(f"- **Excluded alive-only:** {s['alive_excluded']} configs "
+                     f"passed quality but are NOT in the sub "
+                     f"(include_alive_no_gemini=false)")
     lines += ["", "## \u264aGemini configs in sub by country", ""]
     if cc:
         lines += ["| Country | Gemini-OK |", "|---|---|"]
@@ -874,8 +878,10 @@ def main():
     if qf:
         print("  quality rejects: " + "  ".join(
             f"{k}:{v}" for k, v in qf.most_common()))
-    print(f"  IN SUB: {len(final_links)} = {len(gemini_ok)} with "
-          f"\u264aGemini + {len(alive_only)} alive-only")
+    print(f"  IN SUB: {len(final_links)} = {len(gemini_ok)} with \u264aGemini"
+          + (f" + {len(alive_only)} alive-only" if include_alive else
+             (f"  (+{len(alive_only)} alive-only excluded: "
+              f"include_alive_no_gemini=false)" if alive_only else "")))
     summary = {
         "tested": len(results),
         "alive": alive_count,
@@ -885,7 +891,8 @@ def main():
         "blocked": blocked,
         "qf": dict(qf),
         "gemini_in_sub": len(gemini_ok),
-        "alive_in_sub": len(alive_only),
+        "alive_in_sub": len(alive_only) if include_alive else 0,
+        "alive_excluded": 0 if include_alive else len(alive_only),
         "in_sub": len(final_links),
         "no_fp": total_no_fp,
     }
