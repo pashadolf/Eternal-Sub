@@ -681,8 +681,8 @@ def main():
 
     # 4. build subscription
     gemini_ok = sorted([r for r in results if r["gemini"]], key=lambda r: r["ping"])
-    alive_only = sorted([r for r in results
-                         if r["alive"] and not r["gemini"]], key=lambda r: r["ping"])
+    alive_only = sorted([r for r in results if r["alive"] and not r["gemini"]
+                         and r["loc"] in allowed], key=lambda r: r["ping"])
 
     final_links = []
     for r in gemini_ok:
