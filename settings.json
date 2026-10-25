@@ -1,5 +1,5 @@
 {
-  "workers": 24,
+  "workers": 32,
   "base_port": 28100,
   "max_latency_ms": 5000,
   "gemini_timeout_s": 6,
@@ -30,7 +30,7 @@
     "https://github.com/iampedii/whitedns-sub/raw/refs/heads/main/base64.txt",
     "https://github.com/Au1rxx/free-vpn-subscriptions/raw/refs/heads/main/output/v2ray-base64.txt",
     "https://github.com/0xRadikal/Free-v2ray-Configs/raw/refs/heads/main/verified/configs.txt",
-    "https://cdn.jsdelivr.net/gh/0xRadikal/Free-v2ray-Configs@main/all/configs_base64.txt",
+    "https://cdn.jsdelivr.net/gh/0xRadikal/Free-v2ray-Configs@main/light/configs_base64.txt",
     "https://github.com/F0rc3Run/F0rc3Run/raw/refs/heads/main/Best-Results/proxies.txt",
     "https://github.com/Delta-Kronecker/V2ray-Config/raw/refs/heads/main/config/protocols/vless.txt",
     "https://github.com/ermaozi/get_subscribe/raw/refs/heads/main/subscribe/v2ray.txt",
