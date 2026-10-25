@@ -123,7 +123,7 @@ def parse_vless(link):
         net = "http"
     sec = p.get("security", "none")
     sni = p.get("sni") or addr
-    fp = p.get("fp", "chrome")
+    fp = p.get("fp", "")
     path = p.get("path", "/")
     pbk, sid = p.get("pbk", ""), p.get("sid", "")
 
@@ -139,12 +139,14 @@ def parse_vless(link):
     }
     ss = outbound["streamSettings"]
     if sec == "reality":
-        ss["realitySettings"] = {"show": False, "fingerprint": fp,
+        ss["realitySettings"] = {"show": False, "fingerprint": fp or "chrome",
                                  "serverName": sni, "publicKey": pbk,
                                  "shortId": sid or ""}
     elif sec == "tls":
-        ss["tlsSettings"] = {"serverName": sni, "fingerprint": fp,
-                             "allowInsecure": True}
+        tls = {"serverName": sni, "allowInsecure": True}
+        if fp:  # faithful to the link: no fp -> raw TLS, as a client would do
+            tls["fingerprint"] = fp
+        ss["tlsSettings"] = tls
     if net == "ws":
         ws = {"path": path, "headers": {}}
         if p.get("host"):
@@ -190,8 +192,11 @@ def parse_vmess(link):
     }
     ss = outbound["streamSettings"]
     if sec == "tls":
-        ss["tlsSettings"] = {"serverName": obj.get("sni") or obj.get("host") or addr,
-                             "allowInsecure": True}
+        tls_set = {"serverName": obj.get("sni") or obj.get("host") or addr,
+                   "allowInsecure": True}
+        if obj.get("fp"):
+            tls_set["fingerprint"] = obj["fp"]
+        ss["tlsSettings"] = tls_set
     if net == "ws":
         ws = {"path": obj.get("path") or "/", "headers": {}}
         if obj.get("host"):
@@ -230,6 +235,8 @@ def parse_trojan(link):
                            "tlsSettings": {"serverName": sni,
                                            "allowInsecure": True}},
     }
+    if p.get("fp"):
+        outbound["streamSettings"]["tlsSettings"]["fingerprint"] = p["fp"]
     if net == "ws":
         ws = {"path": p.get("path", "/"), "headers": {}}
         if p.get("host"):
@@ -312,6 +319,23 @@ def dedup_signature(link):
     return body
 
 
+def link_has_fp(link):
+    """True if the link simulates a browser TLS fingerprint (uTLS). Reality
+    always counts: it is uTLS by design and clients inject a default fp."""
+    if link.startswith("vmess://"):
+        try:
+            o = json.loads(b64_decode(link[8:].split("#", 1)[0]))
+        except Exception:
+            return False
+        return o.get("tls") == "reality" or bool(o.get("fp"))
+    q = link.split("?", 1)[1] if "?" in link else ""
+    q = q.split("#", 1)[0]
+    p = parse_params(q)
+    if p.get("security") == "reality":
+        return True
+    return bool(p.get("fp"))
+
+
 # ---------------------------------------------------------------- subscription download
 
 def fetch_url(url, timeout=25):
@@ -332,7 +356,7 @@ def content_to_links(content):
             if l.strip().startswith(SCHEMES)]
 
 
-def download_subs(urls):
+def download_subs(urls, require_fp=False):
     """Returns (items[{raw, sub}], stats[{url, fetched, unique, ping, gemini}])."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -362,34 +386,41 @@ def download_subs(urls):
             continue
         links = content_to_links(contents[url])
         st = {"url": url, "fetched": len(links), "unique": 0,
-              "alive": 0, "gemini": 0}
+              "alive": 0, "gemini": 0, "no_fp": 0}
         order.append(st)
         for i, raw in enumerate(links):
             sig = dedup_signature(raw)
             if sig in seen:
                 continue
             seen[sig] = True
+            if require_fp and not link_has_fp(raw):
+                st["no_fp"] += 1
+                continue
             items.append({"raw": raw, "sub": url,
                           "name": link_remark(raw, f"node_{len(items) + 1}")})
             st["unique"] += 1
     return items, order
 
 
-def load_local_configs(path):
+def load_local_configs(path, require_fp=False):
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
     links = content_to_links(content)
     label = f"local:{os.path.basename(path)}"
-    seen, items = {}, []
+    seen, items, no_fp = {}, [], 0
     for raw in links:
         sig = dedup_signature(raw)
         if sig in seen:
             continue
         seen[sig] = True
+        if require_fp and not link_has_fp(raw):
+            no_fp += 1
+            continue
         items.append({"raw": raw, "sub": label,
                       "name": link_remark(raw, f"node_{len(items) + 1}")})
     return items, [{"url": label, "fetched": len(links),
-                    "unique": len(items), "alive": 0, "gemini": 0}]
+                    "unique": len(items), "alive": 0, "gemini": 0,
+                    "no_fp": no_fp}]
 
 
 # ---------------------------------------------------------------- testing
@@ -601,6 +632,9 @@ def write_report(path, sub_stats, summary, gemini_ok, started, prefix):
     lines.append(f"- **Duration:** {int((time.time() - started) / 60)} min")
     lines.append(f"- **Xray core:** {xray_ver}")
     lines += ["", "## Funnel", ""]
+    if s.get("no_fp"):
+        lines.append(f"- **No-fingerprint excluded:** {s['no_fp']} configs "
+                     f"(require_fingerprint=true — no uTLS fp in link)")
     lines.append(f"- **Tested:** {s['tested']} configs — **alive:** {s['alive']} "
                  f"({s['allowed_alive']} in allowed countries, "
                  f"{s['foreign_alive']} in other countries skipped)")
@@ -696,6 +730,7 @@ def main():
     max_configs = args.max_configs or int(settings.get("max_configs", 20000))
     budget_min = float(settings.get("runtime_budget_min", 90))
     include_alive = bool(settings.get("include_alive_no_gemini", True))
+    require_fp = bool(settings.get("require_fingerprint", False))
     qcfg = {
         "enabled":        bool(settings.get("quality_test", True)),
         "ka_requests":    int(settings.get("ka_requests", 6)),
@@ -721,20 +756,23 @@ def main():
 
     # 1. collect configs
     if args.configs_file:
-        items, sub_stats = load_local_configs(args.configs_file)
+        items, sub_stats = load_local_configs(args.configs_file, require_fp)
     else:
         urls = settings.get("subscription_urls", [])
         if not urls:
             print("[!] no subscription_urls in settings and no --configs-file")
             sys.exit(2)
         print(f"[*] downloading {len(urls)} subscriptions ...", flush=True)
-        items, sub_stats = download_subs(urls)
+        items, sub_stats = download_subs(urls, require_fp)
 
+    total_no_fp = sum(st.get("no_fp", 0) for st in sub_stats)
     total_unique = len(items)
     if total_unique > max_configs:
         items = items[:max_configs]
     print(f"[+] unique configs: {total_unique}"
-          + (f" (testing first {len(items)})" if total_unique > len(items) else ""))
+          + (f" (testing first {len(items)})" if total_unique > len(items) else "")
+          + (f" | excluded {total_no_fp} without fingerprint"
+             if require_fp and total_no_fp else ""))
 
     if args.dry_run:
         ok = sum(1 for it in items if link_outbound(it["raw"]) is not None)
@@ -849,6 +887,7 @@ def main():
         "gemini_in_sub": len(gemini_ok),
         "alive_in_sub": len(alive_only),
         "in_sub": len(final_links),
+        "no_fp": total_no_fp,
     }
     print(f"  {'#':<3} {'subscription':<42} {'fetched':>7} {'unique':>7} "
           f"{'alive':>6} {'gemini':>6}")
