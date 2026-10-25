@@ -6,6 +6,7 @@
   "max_configs": 20000,
   "runtime_budget_min": 90,
   "include_alive_no_gemini": true,
+  "require_fingerprint": true,
   "quality_test": true,
   "ka_requests": 6,
   "ka_req_timeout": 2,
