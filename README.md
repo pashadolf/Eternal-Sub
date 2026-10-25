@@ -54,6 +54,7 @@ python tester.py --configs-file configs.txt --workers 10 --out-prefix local-test
 | `max_latency_ms` | 5000 | سقف پینگ |
 | `allowed_countries` | US, DE, NL, ... | کشورهای مجاز برای ورود به ساب |
 | `include_alive_no_gemini` | true | کانفیگ زنده‌ی بدون-Gemini از کشور مجاز هم وارد ساب شود |
+| `require_fingerprint` | true | کانفیگ بدون fp (شبیه‌سازی TLS مرورگر/uTLS) اصلاً تست نشود — فیلتر ضد DPI؛ Reality همیشه مجاز است |
 | `subscription_urls` | — | لیست ساب‌های منبع |
 
 ## نکته‌ها
