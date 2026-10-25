@@ -5,7 +5,7 @@
   "gemini_timeout_s": 6,
   "max_configs": 20000,
   "runtime_budget_min": 90,
-  "include_alive_no_gemini": true,
+  "include_alive_no_gemini": false,
   "require_fingerprint": true,
   "quality_test": true,
   "ka_requests": 6,
