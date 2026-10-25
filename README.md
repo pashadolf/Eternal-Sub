@@ -48,7 +48,7 @@ python tester.py --configs-file configs.txt --workers 10 --out-prefix local-test
 
 | کلید | پیش‌فرض | توضیح |
 |---|---|---|
-| `workers` | 24 | تعداد تست موازی |
+| `workers` | 32 | تعداد تست موازی |
 | `max_configs` | 6000 | سقف تعداد کانفیگ تست‌شده در هر اجرا |
 | `runtime_budget_min` | 90 | بعد از این دقیقه، تست جدید شروع نمی‌شود |
 | `max_latency_ms` | 5000 | سقف پینگ |
