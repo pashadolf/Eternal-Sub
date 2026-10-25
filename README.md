@@ -2,66 +2,71 @@
 
 [![Gemini Sub Builder (Github-Gemini)](https://github.com/pashadolf/Eternal-Sub/actions/workflows/gemini-builder.yml/badge.svg)](https://github.com/pashadolf/Eternal-Sub/actions/workflows/gemini-builder.yml)
 
-این ریپو یه تستر خودکار کانفیگ V2Ray است که روی GitHub Actions اجرا می‌شه و یه
-ساب‌اسکریپشن آماده‌ی Gemini می‌سازه. **کاملاً مستقل از فایل `gemini-sub.txt`**
-کار می‌کند (آن فایل مال اسکریپت ویندوزی محلی است و این workflow به آن دست نمی‌زند).
+تستر خودکار کانفیگ V2Ray روی GitHub Actions که هر روز یک ساب‌اسکریپشن آماده‌ی
+Gemini می‌سازد. **کاملاً مستقل از فایل‌های قدیمی** (`gemini-sub.txt` و
+`Eternal sub.txt`) کار می‌کند و فقط فایل‌های `Github-Gemini*.txt` و `REPORT.md`
+را آپدیت می‌کند.
 
-## ساختار فایل‌ها در ریپو
+## لینک ساب
+
+- **Raw:** `https://raw.githubusercontent.com/pashadolf/Eternal-Sub/main/Github-Gemini.txt`
+- **jsDelivr (چند دقیقه دیرتر):** `https://cdn.jsdelivr.net/gh/pashadolf/Eternal-Sub@main/Github-Gemini.txt`
+- گزارش آخرین اجرا: [`REPORT.md`](REPORT.md) — قیف کامل + جدول به‌تفکیک هر ساب
+
+## ساختار
 
 ```
 Eternal-Sub/
-├── tester.py                          ← تستر کراس‌پلتفرم
-├── settings.json                      ← تنظیمات + لیست ساب‌ها (بدون توکن)
-├── Github-Gemini.txt                  ← خروجی: ساب base64 (ساخته‌شده توسط Actions)
-├── Github-Gemini-plain.txt            ← خروجی: لیست خام برای دیباگ
-├── REPORT.md                          ← گزارش آخرین اجرا (جدول به‌تفکیک هر ساب)
+├── tester.py                    ← تستر (پایتون، بدون وابستگی خارجی)
+├── settings.json                ← تنظیمات + لیست ساب‌های منبع (بدون توکن)
+├── Github-Gemini.txt            ← خروجی: ساب base64 (تولید Actions)
+├── Github-Gemini-plain.txt      ← خروجی: لیست خام برای دیباگ
+├── REPORT.md                    ← گزارش آخرین اجرا
+├── gemini-sub.txt               ← (قدیمی) خروجی اپ ویندوزی — دست‌نخورده
+├── Eternal sub.txt              ← (قدیمی) فایل دستی — دست‌نخورده
 └── .github/workflows/gemini-builder.yml
 ```
 
-## لینک ساب (بعد از اولین اجرا)
-
-- **Raw:** `https://raw.githubusercontent.com/pashadolf/Eternal-Sub/main/Github-Gemini.txt`
-- **jsDelivr:** `https://cdn.jsdelivr.net/gh/pashadolf/Eternal-Sub@main/Github-Gemini.txt`
-
 ## چطور کار می‌کند
 
-1. هر روز ساعت ۹ صبح به وقت تهران (۰۵:۳۰ UTC) یا با اجرای دستی (workflow_dispatch) اجرا می‌شود.
-2. Xray-core آخرین نسخه دانلود می‌شود.
-3. `tester.py` ساب‌ها را دانلود، تکراری‌ها را حذف، و همه را موازی تست می‌کند:
-   - پینگ و لوکیشن با `cloudflare.com/cdn-cgi/trace`
-   - چک عمیق Gemini (طول HTML + متن‌های بلاک کشور) فقط برای کشورهای مجاز
-4. کانفیگ‌های پاس‌شده rename می‌شوند (پرچم + ♊Gemini؛ US با پرچم 🇧🇿 اول لیست می‌آید)
-   و در `Github-Gemini.txt` (base64) commit می‌شوند.
-5. اگر هیچ کانفیگی پاس نکند، فایل قبلی دست‌نخورده می‌ماند (job قرمز می‌شود).
+هر روز ساعت ~۹ صبح تهران (۰۵:۳۰ UTC؛ زمان‌بندی GitHub گاهی ۵–۲۰ دقیقه تأخیر
+دارد) یا با اجرای دستی (Run workflow):
 
-## اجرای دستی
-
-تب **Actions** → **Gemini Sub Builder** → **Run workflow**.
-
-یا لوکال (ویندوز):
-
-```
-python tester.py --configs-file configs.txt --workers 10 --out-prefix local-test
-```
-
-(اگر xray کنار Happ نصب باشد خودش پیدایش می‌کند؛ وگرنه `--xray PATH` بده.)
+1. Xray-core آخرین نسخه دانلود می‌شود.
+2. ۲۴ ساب منبع دانلود، دیکد و **dedup** می‌شوند (بر اساس سرور:پورت:UUID —
+   نه اسم؛ برای vmess از JSON درون base64).
+3. **دروازه‌ی فینگرپرینت:** کانفیگ بدون `fp` (شبیه‌سازی uTLS مرورگر) اصلاً
+   تست نمی‌شود — فیلتر ضد DPI ایران. کانفیگ‌های Reality همیشه مجازند.
+4. تست موازی (~۳۲ ورکر، هر ورکر پورت و xray مستقل خودش را دارد):
+   - پینگ و لوکیشن با `cloudflare.com/cdn-cgi/trace` — فقط کشورهای مجاز ادامه می‌دهند
+   - **چک عمیق Gemini:** کد HTTP نهایی باید ۲۰۰ باشد + بدنه‌ی کامل HTML +
+     بدون پیام بلاک جغرافیایی
+   - **باتری کیفیت** (برای ورود به ساب):
+     - ۶ درخواست روی یک اتصال باز (keep-alive) + جیتر < ۸ برابر
+     - دانلود کامل ۲.۵MB بدون استال (سرعت هرگز ۳ ثانیه زیر ۳۰KB/s نمی‌افتد)
+     - آپلود ۵۱۲KB موفق
+5. فقط کانفیگ‌های ♊Gemini وارد ساب می‌شوند (با rename: پرچم کشور + ♊Gemini؛
+   US با پرچم 🇧🇿 اول لیست می‌آید) و با `GITHUB_TOKEN` خود Actions کامیٹ می‌شوند.
+6. اگر هیچ کانفیگی پاس نشود، ساب قبلی دست‌نخورده می‌ماند (اجرای قرمز می‌شود).
 
 ## تنظیمات مهم (`settings.json`)
 
-| کلید | پیش‌فرض | توضیح |
+| کلید | مقدار فعلی | توضیح |
 |---|---|---|
 | `workers` | 32 | تعداد تست موازی |
-| `max_configs` | 6000 | سقف تعداد کانفیگ تست‌شده در هر اجرا |
-| `runtime_budget_min` | 90 | بعد از این دقیقه، تست جدید شروع نمی‌شود |
+| `allowed_countries` | US, DE, FR, NL, GB, CH, NO, TR, AE, SG | کشورهای مجاز |
+| `require_fingerprint` | true | بدون fp تست نشود (ضد DPI؛ Reality مجاز) |
+| `include_alive_no_gemini` | false | کانفیگ خوبِ بدون-Gemini هم وارد ساب شود؟ |
 | `max_latency_ms` | 5000 | سقف پینگ |
-| `allowed_countries` | US, DE, NL, ... | کشورهای مجاز برای ورود به ساب |
-| `include_alive_no_gemini` | true | کانفیگ زنده‌ی بدون-Gemini از کشور مجاز هم وارد ساب شود |
-| `require_fingerprint` | true | کانفیگ بدون fp (شبیه‌سازی TLS مرورگر/uTLS) اصلاً تست نشود — فیلتر ضد DPI؛ Reality همیشه مجاز است |
-| `subscription_urls` | — | لیست ساب‌های منبع |
+| `dl_bytes` / `up_bytes` | 2.5MB / 512KB | حجم تست دانلود / آپلود |
+| `ka_requests` / `ka_spread` | 6 / 8 | تعداد درخواست keep-alive / حداکثر جیتر |
+| `max_configs` | 20000 | سقف تست هر اجرا |
+| `runtime_budget_min` | 90 | سقف زمان تست (نگهبان امنیتی) |
+| `subscription_urls` | ۲۴ آدرس | ساب‌های منبع |
 
 ## نکته‌ها
 
-- زمان‌بندی GitHub گاهی ۵ تا ۲۰ دقیقه تأخیر دارد؛ یعنی اجرا معمولاً بین ۱۰:۰۰ تا ۱۰:۲۰ صبح شروع می‌شود.
-- ریپو باید **public** باشد تا لینک raw داخل کلاینت‌ها کار کند.
-- نیازی به هیچ توکنی نیست؛ از `GITHUB_TOKEN` خود Actions استفاده می‌شود.
-- تداخلی با `gemini-sub.txt` نیست: این workflow فقط `Github-Gemini*.txt` را commit می‌کند.
+- ریپو باید **public** باشد تا لینک raw در کلاینت‌ها کار کند.
+- هیچ توکنی در ریپو نیست؛ پوش با `GITHUB_TOKEN` خود Actions انجام می‌شود.
+- تست‌ها از دیتاسنتر GitHub انجام می‌شوند؛ رفتار کانفیگ از اینترنت ایران می‌تواند
+  متفاوت باشد — به همین دلیل فیلتر fp روش است.
