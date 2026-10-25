@@ -2,7 +2,7 @@ name: Gemini Sub Builder (Github-Gemini)
 
 on:
   schedule:
-    - cron: "30 6 * * *" # daily 10:00 Asia/Tehran (UTC+3:30, no DST in Iran)
+    - cron: "30 5 * * *" # daily 10:00 Asia/Tehran (UTC+3:30, no DST in Iran)
   workflow_dispatch:
   push:
     branches: [main]
@@ -24,10 +24,10 @@ jobs:
     timeout-minutes: 110
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
