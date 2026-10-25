@@ -1,5 +1,7 @@
 # Github-Gemini — Gemini Sub Builder on GitHub Actions
 
+[![Gemini Sub Builder (Github-Gemini)](https://github.com/pashadolf/Eternal-Sub/actions/workflows/gemini-builder.yml/badge.svg)](https://github.com/pashadolf/Eternal-Sub/actions/workflows/gemini-builder.yml)
+
 این ریپو یه تستر خودکار کانفیگ V2Ray است که روی GitHub Actions اجرا می‌شه و یه
 ساب‌اسکریپشن آماده‌ی Gemini می‌سازه. **کاملاً مستقل از فایل `gemini-sub.txt`**
 کار می‌کند (آن فایل مال اسکریپت ویندوزی محلی است و این workflow به آن دست نمی‌زند).
