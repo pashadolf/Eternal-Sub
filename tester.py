@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ---------------------------------------------------------------- constants
@@ -418,8 +419,78 @@ def curl_text(args, timeout):
         return ""
 
 
+def curl_run(args, timeout):
+    try:
+        out = subprocess.run([CURL] + args, capture_output=True,
+                             timeout=timeout + 4)
+        return out.returncode, out.stdout.decode("utf-8", "ignore")
+    except Exception:
+        return 1, ""
+
+
+def quality_battery(port, q, workdir):
+    """Stage-3 quality gate on one reused xray inbound:
+    1) keep-alive stability + jitter: N tiny transfers on ONE connection
+    2) download stall test: sustained throughput must never stall
+    3) upload test: POST random bytes (catches broken upload path / Telegram
+       stuck on 'Updating...').
+    Returns (passed, fail_reason)."""
+    socks = ["--socks5-hostname", f"127.0.0.1:{port}"]
+    devnull = "NUL" if os.name == "nt" else "/dev/null"
+
+    # 1) keep-alive + jitter (curl reuses the connection across URLs)
+    n = q["ka_requests"]
+    url1 = "https://speed.cloudflare.com/__down?bytes=1"
+    ka_total = n * q["ka_req_timeout"] + 4
+    rc, out = curl_run(["-s", "-m", str(q["ka_req_timeout"]), *socks,
+                        "-o", devnull, "-w", "%{time_total}\n",
+                        *([url1] * n)], ka_total)
+    try:
+        times = [float(x) for x in out.split() if x]
+    except ValueError:
+        times = []
+    if rc != 0 or len(times) != n:
+        return False, "ka"
+    spread = max(times) / max(min(times), 0.001)
+    if spread > q["ka_spread"]:
+        return False, "jitter"
+
+    # 2) download stall test: full file within dl_max, never stalled
+    want = q["dl_bytes"]
+    rc, out = curl_run(["-s", "-m", str(q["dl_max"]), *socks,
+                        "-o", devnull, "-w", "%{size_download}",
+                        "--speed-limit", str(q["dl_min_bps"]),
+                        "--speed-time", str(q["dl_stall"]),
+                        f"https://speed.cloudflare.com/__down?bytes={want}"],
+                       q["dl_max"])
+    try:
+        got = int(out.strip() or 0)
+    except ValueError:
+        got = 0
+    if rc != 0 or got < want * 0.98:
+        return False, "dl"
+
+    # 3) upload test
+    up_file = os.path.join(workdir, f"up_{port}.bin")
+    try:
+        if not os.path.isfile(up_file) or os.path.getsize(up_file) != q["up_bytes"]:
+            with open(up_file, "wb") as f:
+                f.write(os.urandom(q["up_bytes"]))
+    except OSError:
+        return False, "up"
+    rc, out = curl_run(["-s", "-m", str(q["up_max"]), *socks,
+                        "-o", devnull, "-w", "%{http_code}",
+                        "--data-binary", f"@{up_file}",
+                        "-H", "Content-Type: application/octet-stream",
+                        "https://speed.cloudflare.com/__up"], q["up_max"])
+    if rc != 0 or out.strip() != "200":
+        return False, "up"
+
+    return True, ""
+
+
 def test_config(xray_path, item, base_port, max_latency_ms, allowed,
-                gemini_timeout, workdir):
+                gemini_timeout, workdir, qcfg):
     idx = worker_index()
     port = base_port + idx
     cfg_path = os.path.join(workdir, f"xray_w{idx}.json")
@@ -427,7 +498,8 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
     outbound = link_outbound(item["raw"])
     if outbound is None:
         return {**item, "alive": False, "status": "UNSUPPORTED", "ping": 0,
-                "loc": "", "ip": "", "gemini": False}
+                "loc": "", "ip": "", "gemini": False, "quality_ok": True,
+                "q_fail": ""}
 
     cfg = {
         "log": {"loglevel": "none"},
@@ -440,7 +512,7 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
 
     trace_t = max(3, int(round(max_latency_ms / 1000)))
     res = {**item, "alive": False, "status": "DEAD", "ping": 0, "loc": "",
-           "ip": "", "gemini": False}
+           "ip": "", "gemini": False, "quality_ok": True, "q_fail": ""}
     proc = None
     try:
         proc = subprocess.Popen([xray_path, "run", "-c", cfg_path],
@@ -466,15 +538,28 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
             res["status"] = "OTHER_COUNTRY"
             return res
 
-        body = curl_text(["-s", "-L", "-m", str(gemini_timeout),
-                          "--socks5-hostname", f"127.0.0.1:{port}",
-                          "https://gemini.google.com"], gemini_timeout)
-        if len(body) > MIN_GEMINI_HTML_LEN and not any(
-                pat in body for pat in BLOCKED_PATTERNS):
+        # deep Gemini check: final HTTP status must be 200 (not 403 / error
+        # redirect) AND body must be the real app shell without geo-block text
+        rc, gout = curl_run(["-s", "-L", "-m", str(gemini_timeout),
+                             "--socks5-hostname", f"127.0.0.1:{port}",
+                             "-w", "\n__CODE__%{http_code}",
+                             "https://gemini.google.com"], gemini_timeout)
+        body, _, code = gout.rpartition("__CODE__")
+        if (rc == 0 and code.strip() == "200"
+                and len(body) > MIN_GEMINI_HTML_LEN
+                and not any(pat in body for pat in BLOCKED_PATTERNS)):
             res["gemini"] = True
             res["status"] = "PASS_GEMINI"
         else:
             res["status"] = "GEMINI_BLOCKED"
+
+        # stage 3: quality battery for everything about to enter the sub
+        if qcfg["enabled"]:
+            q_ok, q_why = quality_battery(port, qcfg, workdir)
+            res["quality_ok"] = q_ok
+            res["q_fail"] = q_why
+            if not q_ok and res["status"] == "PASS_GEMINI":
+                res["status"] = "GEMINI_QFAIL"
         return res
     except Exception:
         res["status"] = "ERROR"
@@ -510,6 +595,8 @@ def write_report(path, sub_stats, results, gemini_ok, in_sub, started, prefix):
                 if repo and run_id else "_local run_")
     xray_ver = os.environ.get("XRAY_VERSION", "n/a")
     alive = sum(1 for r in results if r["alive"])
+    raw_gemini = sum(1 for r in results if r["gemini"])
+    qf = Counter(r["q_fail"] for r in results if r["q_fail"])
     cc = Counter(r["loc"] for r in gemini_ok)
 
     lines = ["# Github-Gemini — Build Report", ""]
@@ -518,7 +605,11 @@ def write_report(path, sub_stats, results, gemini_ok, in_sub, started, prefix):
     lines.append(f"- **Duration:** {int((time.time() - started) / 60)} min")
     lines.append(f"- **Xray core:** {xray_ver}")
     lines.append(f"- **Tested:** {len(results)} configs — **alive:** {alive} — "
-                 f"**Gemini-OK:** {len(gemini_ok)} — **in sub:** {in_sub}")
+                 f"**Gemini-OK:** {raw_gemini} — **in sub:** {in_sub}")
+    if qf:
+        qs = ", ".join(f"{k}={v}" for k, v in qf.most_common())
+        lines.append(f"- **Quality rejects:** {sum(qf.values())} ({qs}) — "
+                     f"ka=keep-alive, jitter, dl=download/speed, up=upload")
     lines += ["", "## Gemini-OK by country", ""]
     if cc:
         lines += ["| Country | Gemini-OK |", "|---|---|"]
@@ -600,6 +691,18 @@ def main():
     max_configs = args.max_configs or int(settings.get("max_configs", 20000))
     budget_min = float(settings.get("runtime_budget_min", 90))
     include_alive = bool(settings.get("include_alive_no_gemini", True))
+    qcfg = {
+        "enabled":        bool(settings.get("quality_test", True)),
+        "ka_requests":    int(settings.get("ka_requests", 6)),
+        "ka_req_timeout": int(settings.get("ka_req_timeout", 2)),
+        "ka_spread":      float(settings.get("ka_spread", 8)),
+        "dl_bytes":       int(settings.get("dl_bytes", 2500000)),
+        "dl_min_bps":     int(settings.get("dl_min_bps", 30000)),
+        "dl_stall":       int(settings.get("dl_stall_secs", 3)),
+        "dl_max":         int(settings.get("dl_max_secs", 12)),
+        "up_bytes":       int(settings.get("up_bytes", 524288)),
+        "up_max":         int(settings.get("up_max_secs", 10)),
+    }
 
     started = time.time()
     print("=" * 70)
@@ -655,7 +758,8 @@ def main():
     deadline = started + budget_min * 60
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(test_config, xray_path, it, base_port, max_latency,
-                            allowed, gemini_timeout, workdir): it for it in items}
+                            allowed, gemini_timeout, workdir, qcfg): it
+                for it in items}
         done = 0
         for fut in as_completed(futs):
             done += 1
@@ -665,6 +769,9 @@ def main():
             tag = f"[{done}/{len(items)}]"
             if res["status"] == "PASS_GEMINI":
                 tprint(f"{tag} PASS {res['loc']} {res['ping']:>5}ms gemini=OK  {name}")
+            elif res["status"] == "GEMINI_QFAIL":
+                tprint(f"{tag} QF   {res['loc']} {res['ping']:>5}ms "
+                       f"gemini=OK qfail={res['q_fail']}  {name}")
             elif res["status"] == "GEMINI_BLOCKED":
                 tprint(f"{tag} blk  {res['loc']} {res['ping']:>5}ms gemini=NO  {name}")
             elif res["status"] == "OTHER_COUNTRY":
@@ -679,10 +786,12 @@ def main():
                     f2.cancel()
                 break
 
-    # 4. build subscription
-    gemini_ok = sorted([r for r in results if r["gemini"]], key=lambda r: r["ping"])
+    # 4. build subscription (quality gate applies to every entry)
+    gemini_ok = sorted([r for r in results if r["gemini"] and r["quality_ok"]],
+                       key=lambda r: r["ping"])
     alive_only = sorted([r for r in results if r["alive"] and not r["gemini"]
-                         and r["loc"] in allowed], key=lambda r: r["ping"])
+                         and r["loc"] in allowed and r["quality_ok"]],
+                        key=lambda r: r["ping"])
 
     final_links = []
     for r in gemini_ok:
@@ -709,8 +818,15 @@ def main():
     print("  PER-SUBSCRIPTION PERFORMANCE REPORT")
     print("=" * 80)
     alive_count = sum(1 for r in results if r["alive"])
+    raw_gemini = sum(1 for r in results if r["gemini"])
+    qf = Counter(r["q_fail"] for r in results
+                 if r["alive"] and r["loc"] in allowed and r["q_fail"])
     print(f"  tested={len(results)}  alive={alive_count}  "
-          f"gemini_ok={len(gemini_ok)}  in_sub={len(final_links)}")
+          f"gemini_ok={raw_gemini}  quality_ok={len(gemini_ok) + len(alive_only)}  "
+          f"in_sub={len(final_links)}")
+    if qf:
+        print("  quality rejects: " + "  ".join(
+            f"{k}:{v}" for k, v in qf.most_common()))
     print(f"  {'#':<3} {'subscription':<42} {'fetched':>7} {'unique':>7} "
           f"{'alive':>6} {'gemini':>6}")
     print("  " + "-" * 78)
@@ -722,7 +838,6 @@ def main():
     print("  " + "-" * 78)
     print(f"  {'ALL':<3} {'OVERALL TOTALS':<42} {tot['fetched']:>7} "
           f"{tot['unique']:>7} {tot['alive']:>6} {tot['gemini']:>6}")
-    from collections import Counter
     cc = Counter(r["loc"] for r in gemini_ok)
     if cc:
         print("  Gemini-OK by country: " + "  ".join(
