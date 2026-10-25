@@ -586,31 +586,36 @@ def sub_short_name(url):
     return (owner + (tail[-1] if tail else ""))[:42]
 
 
-def write_report(path, sub_stats, results, gemini_ok, in_sub, started, prefix):
-    from collections import Counter
-
+def write_report(path, sub_stats, summary, gemini_ok, started, prefix):
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     run_id = os.environ.get("GITHUB_RUN_ID", "")
     run_link = (f"https://github.com/{repo}/actions/runs/{run_id}"
                 if repo and run_id else "_local run_")
     xray_ver = os.environ.get("XRAY_VERSION", "n/a")
-    alive = sum(1 for r in results if r["alive"])
-    raw_gemini = sum(1 for r in results if r["gemini"])
-    qf = Counter(r["q_fail"] for r in results if r["q_fail"])
     cc = Counter(r["loc"] for r in gemini_ok)
+    s = summary
 
     lines = ["# Github-Gemini — Build Report", ""]
     lines.append(f"- **Run:** {run_link}")
     lines.append(f"- **Date (UTC):** {time.strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"- **Duration:** {int((time.time() - started) / 60)} min")
     lines.append(f"- **Xray core:** {xray_ver}")
-    lines.append(f"- **Tested:** {len(results)} configs — **alive:** {alive} — "
-                 f"**Gemini-OK:** {raw_gemini} — **in sub:** {in_sub}")
-    if qf:
-        qs = ", ".join(f"{k}={v}" for k, v in qf.most_common())
-        lines.append(f"- **Quality rejects:** {sum(qf.values())} ({qs}) — "
+    lines += ["", "## Funnel", ""]
+    lines.append(f"- **Tested:** {s['tested']} configs — **alive:** {s['alive']} "
+                 f"({s['allowed_alive']} in allowed countries, "
+                 f"{s['foreign_alive']} in other countries skipped)")
+    lines.append(f"- **Gemini-OK:** {s['raw_gemini']} of {s['allowed_alive']} "
+                 f"({s['blocked']} Gemini-blocked)")
+    if s["qf"]:
+        qs = ", ".join(f"{k}={v}" for k, v in
+                       sorted(s["qf"].items(), key=lambda x: -x[1]))
+        lines.append(f"- **Quality rejects:** {sum(s['qf'].values())} ({qs}) — "
                      f"ka=keep-alive, jitter, dl=download/speed, up=upload")
-    lines += ["", "## Gemini-OK by country", ""]
+    lines.append(f"- **In sub:** **{s['in_sub']}** configs = "
+                 f"**{s['gemini_in_sub']}** \u264aGemini + "
+                 f"**{s['alive_in_sub']}** alive-only "
+                 f"(allowed country, no Gemini, passed quality)")
+    lines += ["", "## \u264aGemini configs in sub by country", ""]
     if cc:
         lines += ["| Country | Gemini-OK |", "|---|---|"]
         for c, n in cc.most_common():
@@ -818,15 +823,33 @@ def main():
     print("  PER-SUBSCRIPTION PERFORMANCE REPORT")
     print("=" * 80)
     alive_count = sum(1 for r in results if r["alive"])
+    allowed_alive = [r for r in results if r["alive"] and r["loc"] in allowed]
     raw_gemini = sum(1 for r in results if r["gemini"])
+    foreign = alive_count - len(allowed_alive)
+    blocked = len(allowed_alive) - raw_gemini
     qf = Counter(r["q_fail"] for r in results
                  if r["alive"] and r["loc"] in allowed and r["q_fail"])
     print(f"  tested={len(results)}  alive={alive_count}  "
-          f"gemini_ok={raw_gemini}  quality_ok={len(gemini_ok) + len(alive_only)}  "
-          f"in_sub={len(final_links)}")
+          f"(allowed countries: {len(allowed_alive)}, other: {foreign} skipped)")
+    print(f"  gemini_ok={raw_gemini}/{len(allowed_alive)}  "
+          f"({blocked} gemini-blocked)")
     if qf:
         print("  quality rejects: " + "  ".join(
             f"{k}:{v}" for k, v in qf.most_common()))
+    print(f"  IN SUB: {len(final_links)} = {len(gemini_ok)} with "
+          f"\u264aGemini + {len(alive_only)} alive-only")
+    summary = {
+        "tested": len(results),
+        "alive": alive_count,
+        "allowed_alive": len(allowed_alive),
+        "foreign_alive": foreign,
+        "raw_gemini": raw_gemini,
+        "blocked": blocked,
+        "qf": dict(qf),
+        "gemini_in_sub": len(gemini_ok),
+        "alive_in_sub": len(alive_only),
+        "in_sub": len(final_links),
+    }
     print(f"  {'#':<3} {'subscription':<42} {'fetched':>7} {'unique':>7} "
           f"{'alive':>6} {'gemini':>6}")
     print("  " + "-" * 78)
@@ -857,8 +880,8 @@ def main():
         print(f"    {b64_file}")
         print(f"    {plain}")
         report_path = os.path.abspath("REPORT.md")
-        write_report(report_path, sub_stats, results, gemini_ok,
-                     len(final_links), started, args.out_prefix)
+        write_report(report_path, sub_stats, summary, gemini_ok,
+                     started, args.out_prefix)
         print(f"    {report_path}")
         if git_commit_outputs(args.out_prefix):
             print("[+] outputs committed to the repository")
