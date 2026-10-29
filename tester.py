@@ -307,7 +307,8 @@ def rename_link(raw, new_name):
 
 
 DEDUP_ALIASES = {"type": {"raw": "tcp", "h2": "http"}}
-DEDUP_IGNORED_PARAMS = {"fp", "alpn", "allowinsecure", "insecure", "allow_insecure"}
+DEDUP_IGNORED_PARAMS = {"fp", "alpn", "allowinsecure", "insecure", "allow_insecure",
+                        "packetencoding", "spx"}
 DEDUP_DEFAULTS = {"type": "tcp", "security": "none", "encryption": "none",
                   "headertype": "none"}
 DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow", "sid"}
