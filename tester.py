@@ -306,10 +306,11 @@ def rename_link(raw, new_name):
     return f"{clean}#{urllib.parse.quote(new_name, safe='')}"
 
 
+DEDUP_ALIASES = {"type": {"raw": "tcp", "h2": "http"}}
 DEDUP_IGNORED_PARAMS = {"fp", "alpn", "allowinsecure", "insecure", "allow_insecure"}
 DEDUP_DEFAULTS = {"type": "tcp", "security": "none", "encryption": "none",
                   "headertype": "none"}
-DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow"}
+DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow", "sid"}
 
 
 def dedup_signature(link):
@@ -333,6 +334,7 @@ def dedup_signature(link):
                 continue
             if k in DEDUP_LOWER_VALUES:
                 v = v.lower()
+            v = DEDUP_ALIASES.get(k, {}).get(v, v)
             if DEDUP_DEFAULTS.get(k) == v:
                 continue
             params[k] = v
