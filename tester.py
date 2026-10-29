@@ -306,17 +306,44 @@ def rename_link(raw, new_name):
     return f"{clean}#{urllib.parse.quote(new_name, safe='')}"
 
 
+DEDUP_IGNORED_PARAMS = {"fp", "alpn", "allowinsecure", "insecure", "allow_insecure"}
+DEDUP_DEFAULTS = {"type": "tcp", "security": "none", "encryption": "none",
+                  "headertype": "none"}
+DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow"}
+
+
 def dedup_signature(link):
-    """Same node seen in different subs -> same signature (fragment stripped)."""
+    """Same endpoint seen in different subs / with cosmetic differences
+    (fingerprint, alpn, remark, param order, host case) -> same signature."""
     body = link.split("#", 1)[0].strip()
-    if link.startswith("vmess://"):
-        try:
+    try:
+        if link.startswith("vmess://"):
             o = json.loads(b64_decode(body[8:]))
             if o.get("add") and o.get("port") and o.get("id"):
-                return f"vmess://{o['add']}:{o['port']}:{o['id']}"
-        except Exception:
-            pass
-    return body
+                return (f"vmess://{str(o['add']).lower()}:{o['port']}:"
+                        f"{str(o['id']).lower()}")
+            return body
+        scheme, _, rest = body.partition("://")
+        userinfo, _, tail = rest.rpartition("@")
+        hp, _, query = tail.partition("?")
+        host, port = split_host_port(hp)
+        params = {}
+        for k, v in parse_params(query).items():
+            if k in DEDUP_IGNORED_PARAMS or v == "":
+                continue
+            if k in DEDUP_LOWER_VALUES:
+                v = v.lower()
+            if DEDUP_DEFAULTS.get(k) == v:
+                continue
+            params[k] = v
+        if scheme == "vless":
+            userinfo = userinfo.lower()
+        else:
+            userinfo = urllib.parse.unquote(userinfo)
+        return (f"{scheme}://{userinfo}@{host.lower()}:{port}"
+                f"?{urllib.parse.urlencode(sorted(params.items()))}")
+    except Exception:
+        return body
 
 
 def link_has_fp(link):
@@ -334,6 +361,29 @@ def link_has_fp(link):
     if p.get("security") == "reality":
         return True
     return bool(p.get("fp"))
+
+
+def add_unique(seen, items, stats, raw, sub, require_fp):
+    """Add raw to items unless an equivalent node is already there. When a
+    duplicate has a TLS fingerprint and the stored one doesn't, it replaces it.
+    `stats` maps sub url -> its stats dict."""
+    has_fp = link_has_fp(raw)
+    st = stats[sub]
+    if require_fp and not has_fp:
+        st["no_fp"] += 1          # filter BEFORE marking as seen
+        return
+    sig = dedup_signature(raw)
+    idx = seen.get(sig)
+    if idx is None:
+        seen[sig] = len(items)
+        items.append({"raw": raw, "sub": sub, "has_fp": has_fp,
+                      "name": link_remark(raw, f"node_{len(items) + 1}")})
+        st["unique"] += 1
+    elif has_fp and not items[idx]["has_fp"]:
+        stats[items[idx]["sub"]]["unique"] -= 1
+        items[idx] = {"raw": raw, "sub": sub, "has_fp": True,
+                      "name": link_remark(raw, f"node_{idx + 1}")}
+        st["unique"] += 1
 
 
 # ---------------------------------------------------------------- subscription download
@@ -380,7 +430,7 @@ def download_subs(urls, require_fp=False):
             else:
                 tprint(f"    [!] download failed: {url} ({err})")
 
-    seen, items, order = {}, [], []
+    seen, items, order, by_url = {}, [], [], {}
     for url in urls:
         if url not in contents:
             continue
@@ -388,17 +438,9 @@ def download_subs(urls, require_fp=False):
         st = {"url": url, "fetched": len(links), "unique": 0,
               "alive": 0, "gemini": 0, "no_fp": 0}
         order.append(st)
-        for i, raw in enumerate(links):
-            sig = dedup_signature(raw)
-            if sig in seen:
-                continue
-            seen[sig] = True
-            if require_fp and not link_has_fp(raw):
-                st["no_fp"] += 1
-                continue
-            items.append({"raw": raw, "sub": url,
-                          "name": link_remark(raw, f"node_{len(items) + 1}")})
-            st["unique"] += 1
+        by_url[url] = st
+        for raw in links:
+            add_unique(seen, items, by_url, raw, url, require_fp)
     return items, order
 
 
@@ -407,20 +449,12 @@ def load_local_configs(path, require_fp=False):
         content = f.read()
     links = content_to_links(content)
     label = f"local:{os.path.basename(path)}"
-    seen, items, no_fp = {}, [], 0
+    st = {"url": label, "fetched": len(links), "unique": 0,
+          "alive": 0, "gemini": 0, "no_fp": 0}
+    seen, items = {}, []
     for raw in links:
-        sig = dedup_signature(raw)
-        if sig in seen:
-            continue
-        seen[sig] = True
-        if require_fp and not link_has_fp(raw):
-            no_fp += 1
-            continue
-        items.append({"raw": raw, "sub": label,
-                      "name": link_remark(raw, f"node_{len(items) + 1}")})
-    return items, [{"url": label, "fetched": len(links),
-                    "unique": len(items), "alive": 0, "gemini": 0,
-                    "no_fp": no_fp}]
+        add_unique(seen, items, {label: st}, raw, label, require_fp)
+    return items, [st]
 
 
 # ---------------------------------------------------------------- testing
