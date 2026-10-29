@@ -306,15 +306,30 @@ def rename_link(raw, new_name):
     return f"{clean}#{urllib.parse.quote(new_name, safe='')}"
 
 
-DEDUP_IGNORED_PARAMS = {"fp", "alpn", "allowinsecure", "insecure", "allow_insecure"}
+DEDUP_CORE_PARAMS = {"type", "security", "sni", "flow", "encryption", "pbk", "sid"}
+DEDUP_BY_TRANSPORT = {
+    "tcp": {"headertype"},
+    "ws": {"host", "path"},
+    "httpupgrade": {"host", "path"},
+    "http": {"host", "path"},
+    "xhttp": {"host", "path", "mode"},
+    "splithttp": {"host", "path", "mode"},
+    "grpc": {"servicename", "authority", "mode"},
+    "kcp": {"headertype", "seed"},
+}
+# unknown transport: stay conservative and compare all routing fields
+DEDUP_FALLBACK_PARAMS = {"host", "path", "servicename", "authority", "mode",
+                         "headertype", "seed"}
+DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow", "sid",
+                      "headertype", "mode"}
+DEDUP_ALIASES = {"type": {"raw": "tcp", "h2": "http"}}
 DEDUP_DEFAULTS = {"type": "tcp", "security": "none", "encryption": "none",
-                  "headertype": "none"}
-DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow"}
+                  "headertype": "none", "path": "/"}
 
 
 def dedup_signature(link):
-    """Same endpoint seen in different subs / with cosmetic differences
-    (fingerprint, alpn, remark, param order, host case) -> same signature."""
+    """Transport-aware whitelist key: server, credential, security, reality
+    keys, and routing fields only for transports where they have an effect."""
     body = link.split("#", 1)[0].strip()
     try:
         if link.startswith("vmess://"):
@@ -327,20 +342,34 @@ def dedup_signature(link):
         userinfo, _, tail = rest.rpartition("@")
         hp, _, query = tail.partition("?")
         host, port = split_host_port(hp)
-        params = {}
+        host = host.lower()
+        defaults = dict(DEDUP_DEFAULTS)
+        if scheme == "trojan":
+            defaults["security"] = "tls"
+
+        raw_params = {}
         for k, v in parse_params(query).items():
-            if k in DEDUP_IGNORED_PARAMS or v == "":
+            if v == "":
                 continue
             if k in DEDUP_LOWER_VALUES:
                 v = v.lower()
-            if DEDUP_DEFAULTS.get(k) == v:
+            raw_params[k] = DEDUP_ALIASES.get(k, {}).get(v, v)
+
+        net = raw_params.get("type", "tcp")
+        keep = DEDUP_CORE_PARAMS | DEDUP_BY_TRANSPORT.get(net, DEDUP_FALLBACK_PARAMS)
+        if net == "tcp" and raw_params.get("headertype") == "http":
+            keep = keep | {"host", "path"}
+
+        params = {}
+        for k, v in raw_params.items():
+            if k not in keep:
+                continue
+            if defaults.get(k) == v or (k == "sni" and v == host):
                 continue
             params[k] = v
-        if scheme == "vless":
-            userinfo = userinfo.lower()
-        else:
-            userinfo = urllib.parse.unquote(userinfo)
-        return (f"{scheme}://{userinfo}@{host.lower()}:{port}"
+        userinfo = (userinfo.lower() if scheme == "vless"
+                    else urllib.parse.unquote(userinfo))
+        return (f"{scheme}://{userinfo}@{host}:{port}"
                 f"?{urllib.parse.urlencode(sorted(params.items()))}")
     except Exception:
         return body
