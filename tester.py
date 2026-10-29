@@ -306,17 +306,20 @@ def rename_link(raw, new_name):
     return f"{clean}#{urllib.parse.quote(new_name, safe='')}"
 
 
+DEDUP_KEEP_PARAMS = {"type", "security", "sni", "host", "path", "servicename",
+                     "authority", "mode", "flow", "encryption", "headertype",
+                     "pbk", "sid", "seed"}
+DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow", "sid",
+                      "headertype", "mode"}
 DEDUP_ALIASES = {"type": {"raw": "tcp", "h2": "http"}}
-DEDUP_IGNORED_PARAMS = {"fp", "alpn", "allowinsecure", "insecure", "allow_insecure",
-                        "packetencoding", "spx"}
 DEDUP_DEFAULTS = {"type": "tcp", "security": "none", "encryption": "none",
-                  "headertype": "none"}
-DEDUP_LOWER_VALUES = {"type", "security", "sni", "host", "flow", "sid"}
+                  "headertype": "none", "path": "/"}
 
 
 def dedup_signature(link):
-    """Same endpoint seen in different subs / with cosmetic differences
-    (fingerprint, alpn, remark, param order, host case) -> same signature."""
+    """Whitelist key: only fields that decide which server is reached and how
+    (server, credential, transport, security, routing, reality keys).
+    Everything else (fp, alpn, spx, packetEncoding, unknown params...) is ignored."""
     body = link.split("#", 1)[0].strip()
     try:
         if link.startswith("vmess://"):
@@ -329,21 +332,23 @@ def dedup_signature(link):
         userinfo, _, tail = rest.rpartition("@")
         hp, _, query = tail.partition("?")
         host, port = split_host_port(hp)
+        host = host.lower()
+        defaults = dict(DEDUP_DEFAULTS)
+        if scheme == "trojan":
+            defaults["security"] = "tls"
         params = {}
         for k, v in parse_params(query).items():
-            if k in DEDUP_IGNORED_PARAMS or v == "":
+            if k not in DEDUP_KEEP_PARAMS or v == "":
                 continue
             if k in DEDUP_LOWER_VALUES:
                 v = v.lower()
             v = DEDUP_ALIASES.get(k, {}).get(v, v)
-            if DEDUP_DEFAULTS.get(k) == v:
+            if defaults.get(k) == v or (k == "sni" and v == host):
                 continue
             params[k] = v
-        if scheme == "vless":
-            userinfo = userinfo.lower()
-        else:
-            userinfo = urllib.parse.unquote(userinfo)
-        return (f"{scheme}://{userinfo}@{host.lower()}:{port}"
+        userinfo = (userinfo.lower() if scheme == "vless"
+                    else urllib.parse.unquote(userinfo))
+        return (f"{scheme}://{userinfo}@{host}:{port}"
                 f"?{urllib.parse.urlencode(sorted(params.items()))}")
     except Exception:
         return body
