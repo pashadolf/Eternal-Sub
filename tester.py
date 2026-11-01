@@ -307,13 +307,21 @@ def rename_link(raw, new_name):
 
 
 def dedup_signature(link):
-    """Same node seen in different subs -> same signature (fragment stripped)."""
+    """Same node seen in different subs -> same signature (fragment stripped).
+
+    For vmess the fp field is intentionally included in the signature so that
+    two vmess links with the same server/port/id but different fingerprints are
+    kept as distinct entries through pass-1 and can reach the fp-priority
+    dedup (pass-2) where the best fingerprint is chosen.  Pass-2 uses
+    base_signature (which omits fp) to group and pick the winner.
+    """
     body = link.split("#", 1)[0].strip()
     if link.startswith("vmess://"):
         try:
             o = json.loads(b64_decode(body[8:]))
             if o.get("add") and o.get("port") and o.get("id"):
-                return f"vmess://{o['add']}:{o['port']}:{o['id']}"
+                fp_val = (o.get("fp") or "").lower()
+                return f"vmess://{o['add']}:{o['port']}:{o['id']}:fp={fp_val}"
         except Exception:
             pass
     return body
@@ -334,6 +342,78 @@ def link_has_fp(link):
     if p.get("security") == "reality":
         return True
     return bool(p.get("fp"))
+
+
+# Fingerprint priority: lower number = higher priority (chrome wins)
+_FP_PRIORITY = {"chrome": 0, "firefox": 1, "safari": 2, "ios": 3,
+                 "android": 4, "edge": 5, "360": 6, "qq": 7,
+                 "random": 8, "randomized": 9}
+_FP_PRIORITY_DEFAULT = 10   # any unknown fp
+_FP_PRIORITY_REALITY = -1   # Reality always beats explicit fp configs
+
+
+def fp_priority(link):
+    """Lower return value = higher priority in fingerprint dedup.
+    Reality (-1) > chrome (0) > firefox (1) > safari (2) > others (10)."""
+    if link.startswith("vmess://"):
+        try:
+            o = json.loads(b64_decode(link[8:].split("#", 1)[0]))
+        except Exception:
+            return _FP_PRIORITY_DEFAULT
+        if o.get("tls") == "reality":
+            return _FP_PRIORITY_REALITY
+        return _FP_PRIORITY.get((o.get("fp") or "").lower(), _FP_PRIORITY_DEFAULT)
+    q = link.split("?", 1)[1] if "?" in link else ""
+    q = q.split("#", 1)[0]
+    p = parse_params(q)
+    if p.get("security") == "reality":
+        return _FP_PRIORITY_REALITY
+    return _FP_PRIORITY.get((p.get("fp") or "").lower(), _FP_PRIORITY_DEFAULT)
+
+
+def base_signature(link):
+    """Signature that ignores the fingerprint parameter — used to group
+    configs that point to the same server but differ only in their fp value.
+    For vmess the fp key is stripped from the JSON payload; for vless/trojan
+    the fp= query parameter is removed before hashing."""
+    if link.startswith("vmess://"):
+        body = link.split("#", 1)[0]
+        try:
+            o = json.loads(b64_decode(body[8:]))
+            if o.get("add") and o.get("port") and o.get("id"):
+                return f"vmess://{o['add']}:{o['port']}:{o['id']}"
+        except Exception:
+            pass
+        return body
+    # vless / trojan: strip fragment, then remove fp= from query string
+    body = link.split("#", 1)[0].strip()
+    if "?" in body:
+        path, _, qs = body.partition("?")
+        parts = [kv for kv in qs.split("&")
+                 if not kv.lower().startswith("fp=")]
+        body = path + ("?" + "&".join(parts) if parts else "")
+    return body
+
+
+def deduplicate_by_fp_priority(items):
+    """Given a list of item dicts (each with a 'raw' link), keep only one
+    per base_signature, preferring chrome > firefox > safari > others.
+    Items that are NOT fingerprint-bearing (no fp, not reality) are treated
+    as lowest priority within their group.
+    Insertion order of the *winning* item is preserved."""
+    best = {}          # base_sig -> item with lowest fp_priority value
+    order = []         # preserve first-seen order of base_sigs
+    for item in items:
+        sig = base_signature(item["raw"])
+        pri = fp_priority(item["raw"])
+        if sig not in best:
+            best[sig] = (pri, item)
+            order.append(sig)
+        else:
+            cur_pri, _ = best[sig]
+            if pri < cur_pri:
+                best[sig] = (pri, item)
+    return [best[sig][1] for sig in order]
 
 
 # ---------------------------------------------------------------- subscription download
@@ -399,6 +479,20 @@ def download_subs(urls, require_fp=False):
             items.append({"raw": raw, "sub": url,
                           "name": link_remark(raw, f"node_{len(items) + 1}")})
             st["unique"] += 1
+
+    # Second-pass dedup: among configs that share the same server/port/uuid
+    # but differ only in their TLS fingerprint, keep the highest-priority fp
+    # (chrome > firefox > safari > others; Reality beats all).
+    before = len(items)
+    items = deduplicate_by_fp_priority(items)
+    removed = before - len(items)
+    if removed:
+        tprint(f"    [i] fp-priority dedup removed {removed} lower-priority "
+               f"fingerprint duplicates (kept chrome/firefox/safari over others)")
+    # Re-number names to stay sequential after dedup
+    for idx, it in enumerate(items):
+        if it["name"].startswith("node_"):
+            it["name"] = f"node_{idx + 1}"
     return items, order
 
 
@@ -418,6 +512,14 @@ def load_local_configs(path, require_fp=False):
             continue
         items.append({"raw": raw, "sub": label,
                       "name": link_remark(raw, f"node_{len(items) + 1}")})
+
+    # Second-pass dedup: keep highest-priority fingerprint per base signature
+    before = len(items)
+    items = deduplicate_by_fp_priority(items)
+    removed = before - len(items)
+    if removed:
+        print(f"    [i] fp-priority dedup removed {removed} lower-priority "
+              f"fingerprint duplicates (kept chrome/firefox/safari over others)")
     return items, [{"url": label, "fetched": len(links),
                     "unique": len(items), "alive": 0, "gemini": 0,
                     "no_fp": no_fp}]
