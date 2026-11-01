@@ -788,6 +788,9 @@ def git_commit_outputs(prefix):
     def git(*args):
         return subprocess.run(["git", *args], capture_output=True, text=True)
 
+    # Ensure we are on the main branch (not detached HEAD) before committing.
+    git("checkout", "main")
+
     files = [f"{prefix}.txt", f"{prefix}-plain.txt", "REPORT.md"]
     git("add", *files)
     if git("diff", "--cached", "--quiet").returncode == 0:
@@ -798,8 +801,8 @@ def git_commit_outputs(prefix):
     git("-c", "user.name=github-actions[bot]",
         "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
         "commit", "-m", msg)
-    git("pull", "--rebase", "--autostash")
-    p = git("push")
+    git("pull", "--rebase", "--autostash", "origin", "main")
+    p = git("push", "origin", "HEAD:main")
     if p.returncode == 0:
         return True
     print(f"[!] git push failed, leaving changes staged for the workflow "
