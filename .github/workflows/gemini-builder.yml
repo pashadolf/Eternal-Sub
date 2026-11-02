@@ -2,7 +2,7 @@ name: Gemini Sub Builder (Github-Gemini)
 
 on:
   schedule:
-    - cron: "30 5 * * *" # daily 10:00 Asia/Tehran (UTC+3:30, no DST in Iran)
+    - cron: "30 5 * * *" # daily 09:00 Asia/Tehran (UTC+3:30, no DST in Iran)
   workflow_dispatch:
   push:
     branches: [main]
@@ -52,11 +52,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout main
           git add Github-Gemini.txt Github-Gemini-plain.txt
           if git diff --cached --quiet; then
             echo "No changes - sub identical to previous run."
           else
             git commit -m "[skip ci] update Github-Gemini sub (xray ${XRAY_VERSION}, $(date -u '+%Y-%m-%d %H:%M') UTC)"
-            git pull --rebase --autostash || true
-            git push
+            git pull --rebase --autostash origin main || true
+            git push origin HEAD:main
           fi
