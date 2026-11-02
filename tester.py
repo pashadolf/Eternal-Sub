@@ -780,34 +780,11 @@ def write_report(path, sub_stats, summary, gemini_ok, started, prefix):
 
 
 def git_commit_outputs(prefix):
-    """On GitHub Actions, commit and push the generated files. Returns True if
-    the remote ended up up-to-date (so the workflow's own commit step no-ops)."""
-    if os.environ.get("GITHUB_ACTIONS") != "true":
-        return False
-
-    def git(*args):
-        return subprocess.run(["git", *args], capture_output=True, text=True)
-
-    # Ensure we are on the main branch (not detached HEAD) before committing.
-    git("checkout", "main")
-
-    files = [f"{prefix}.txt", f"{prefix}-plain.txt", "REPORT.md"]
-    git("add", *files)
-    if git("diff", "--cached", "--quiet").returncode == 0:
-        print("[i] outputs identical to previous run - nothing to commit")
-        return True
-    msg = (f"[skip ci] update Github-Gemini sub + report "
-           f"({time.strftime('%Y-%m-%d %H:%M')} UTC)")
-    git("-c", "user.name=github-actions[bot]",
-        "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
-        "commit", "-m", msg)
-    git("pull", "--rebase", "--autostash", "origin", "main")
-    p = git("push", "origin", "HEAD:main")
-    if p.returncode == 0:
-        return True
-    print(f"[!] git push failed, leaving changes staged for the workflow "
-          f"step: {(p.stderr or '').strip()[:200]}")
-    git("reset", "--soft", "HEAD~1")
+    """On GitHub Actions the workflow's 'Commit new subscription' step handles
+    all git operations.  Returning False here tells the caller that nothing was
+    committed yet so the workflow step will take over.
+    On a local run this function is also a no-op (git push requires credentials
+    that are not available locally by default)."""
     return False
 
 
