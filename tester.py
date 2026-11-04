@@ -35,6 +35,21 @@ BLOCKED_PATTERNS = (
     "not supported in your country",
     "isn't supported in your country",
     "not currently available in your country",
+    "isn't currently available in your country",
+    "not available in your country",
+    "isn't available in your country",
+    "can't be reached from your location",
+    "location is not supported",
+    "unsupported country",
+    "unsupported location",
+    "unusual traffic from your computer network",
+    "unusual traffic",
+    "detected unusual traffic",
+    "systems have detected unusual traffic",
+    "google.com/sorry",
+    "/sorry/index",
+    "recaptcha",
+    "automated queries",
 )
 MIN_GEMINI_HTML_LEN = 2500
 XRAY_CANDIDATES_WIN = [
@@ -309,11 +324,10 @@ def rename_link(raw, new_name):
 def dedup_signature(link):
     """Same node seen in different subs -> same signature (fragment stripped).
 
-    For vmess the fp field is intentionally included in the signature so that
-    two vmess links with the same server/port/id but different fingerprints are
-    kept as distinct entries through pass-1 and can reach the fp-priority
-    dedup (pass-2) where the best fingerprint is chosen.  Pass-2 uses
-    base_signature (which omits fp) to group and pick the winner.
+    For vmess and reality we include the fp field so that configs with different
+    fingerprints pass through pass-1 as distinct items and reach the fp-priority
+    dedup (pass-2) where chrome > firefox > safari is enforced.
+    Pass-2 uses base_signature (which omits fp) to pick the winner.
     """
     body = link.split("#", 1)[0].strip()
     if link.startswith("vmess://"):
@@ -324,6 +338,32 @@ def dedup_signature(link):
                 return f"vmess://{o['add']}:{o['port']}:{o['id']}:fp={fp_val}"
         except Exception:
             pass
+        return body
+
+    if "?" in body:
+        path, _, qs = body.partition("?")
+        p = parse_params(qs)
+        if p.get("security") == "reality" and p.get("pbk"):
+            scheme, _, host_port = path.partition("://")
+            uuid_part = ""
+            hp = host_port
+            if "@" in host_port:
+                uuid_part, _, hp = host_port.rpartition("@")
+            try:
+                _, port = split_host_port(hp)
+            except Exception:
+                port = 0
+            pbk = p.get("pbk", "")
+            sid = p.get("sid", "")
+            sni = p.get("sni", "")
+            flow = p.get("flow", "")
+            net = p.get("type", "tcp")
+            fp = (p.get("fp") or "chrome").lower()
+            return f"reality://{uuid_part}@{port}?pbk={pbk}&sid={sid}&sni={sni}&flow={flow}&net={net}&fp={fp}"
+
+        clean_qs = "&".join(f"{k}={v}" for k, v in sorted(p.items()))
+        return f"{path}?{clean_qs}" if clean_qs else path
+
     return body
 
 
@@ -345,37 +385,55 @@ def link_has_fp(link):
 
 
 # Fingerprint priority: lower number = higher priority (chrome wins)
-_FP_PRIORITY = {"chrome": 0, "firefox": 1, "safari": 2, "ios": 3,
-                 "android": 4, "edge": 5, "360": 6, "qq": 7,
-                 "random": 8, "randomized": 9}
-_FP_PRIORITY_DEFAULT = 10   # any unknown fp
-_FP_PRIORITY_REALITY = -1   # Reality always beats explicit fp configs
+_FP_PRIORITY = {
+    "chrome": 0, "firefox": 1, "safari": 2, "ios": 3,
+    "android": 4, "edge": 5, "360": 6, "qq": 7,
+    "random": 8, "randomized": 9
+}
+_FP_PRIORITY_DEFAULT = 10
+_FP_NO_FP_PRIORITY = 100
 
 
 def fp_priority(link):
-    """Lower return value = higher priority in fingerprint dedup.
-    Reality (-1) > chrome (0) > firefox (1) > safari (2) > others (10)."""
+    """Lower tuple value = higher priority in fingerprint dedup.
+    Tuple structure: (fp_rank, reality_flag)
+    - fp_rank: chrome (0) > firefox (1) > safari (2) > ... > unknown (10) > no_fp (100)
+    - reality_flag: 0 for Reality, 1 for non-Reality (Reality wins if fp_rank is equal).
+    This guarantees:
+      1. chrome always beats firefox and safari (across reality and TLS alike).
+      2. If both have the same fp, Reality beats TLS.
+      3. If neither has chrome, firefox beats safari.
+    """
     if link.startswith("vmess://"):
         try:
             o = json.loads(b64_decode(link[8:].split("#", 1)[0]))
         except Exception:
-            return _FP_PRIORITY_DEFAULT
-        if o.get("tls") == "reality":
-            return _FP_PRIORITY_REALITY
-        return _FP_PRIORITY.get((o.get("fp") or "").lower(), _FP_PRIORITY_DEFAULT)
+            return (_FP_NO_FP_PRIORITY, 1)
+        is_real = 0 if o.get("tls") == "reality" else 1
+        fp_val = (o.get("fp") or ("chrome" if is_real == 0 else "")).lower()
+        if not fp_val:
+            return (_FP_NO_FP_PRIORITY, is_real)
+        return (_FP_PRIORITY.get(fp_val, _FP_PRIORITY_DEFAULT), is_real)
+
     q = link.split("?", 1)[1] if "?" in link else ""
     q = q.split("#", 1)[0]
     p = parse_params(q)
-    if p.get("security") == "reality":
-        return _FP_PRIORITY_REALITY
-    return _FP_PRIORITY.get((p.get("fp") or "").lower(), _FP_PRIORITY_DEFAULT)
+    is_real = 0 if p.get("security") == "reality" else 1
+    raw_fp = p.get("fp")
+    if not raw_fp:
+        if is_real == 0:
+            return (_FP_PRIORITY["chrome"], 0)
+        return (_FP_NO_FP_PRIORITY, 1)
+    return (_FP_PRIORITY.get(raw_fp.lower(), _FP_PRIORITY_DEFAULT), is_real)
 
 
 def base_signature(link):
-    """Signature that ignores the fingerprint parameter — used to group
-    configs that point to the same server but differ only in their fp value.
-    For vmess the fp key is stripped from the JSON payload; for vless/trojan
-    the fp= query parameter is removed before hashing."""
+    """Signature that identifies the underlying server node, ignoring:
+    - the fingerprint parameter (fp=)
+    - remark/fragment (#...)
+    - query parameter ordering differences
+    - IP vs domain differences for Reality servers (same uuid + port + pbk = same server).
+    """
     if link.startswith("vmess://"):
         body = link.split("#", 1)[0]
         try:
@@ -385,13 +443,36 @@ def base_signature(link):
         except Exception:
             pass
         return body
-    # vless / trojan: strip fragment, then remove fp= from query string
+
     body = link.split("#", 1)[0].strip()
     if "?" in body:
         path, _, qs = body.partition("?")
-        parts = [kv for kv in qs.split("&")
-                 if not kv.lower().startswith("fp=")]
-        body = path + ("?" + "&".join(parts) if parts else "")
+        p = parse_params(qs)
+
+        # Reality server equivalence:
+        # If security is reality and pbk is present, uuid + port + pbk uniquely identifies the server
+        # (regardless of whether host is an IP or a domain).
+        if p.get("security") == "reality" and p.get("pbk"):
+            scheme, _, host_port = path.partition("://")
+            uuid_part = ""
+            hp = host_port
+            if "@" in host_port:
+                uuid_part, _, hp = host_port.rpartition("@")
+            try:
+                _, port = split_host_port(hp)
+            except Exception:
+                port = 0
+            pbk = p.get("pbk", "")
+            sid = p.get("sid", "")
+            sni = p.get("sni", "")
+            flow = p.get("flow", "")
+            net = p.get("type", "tcp")
+            return f"reality://{uuid_part}@{port}?pbk={pbk}&sid={sid}&sni={sni}&flow={flow}&net={net}"
+
+        # Standard VLESS / Trojan: normalize query parameters (sorted, fp stripped)
+        clean_qs = "&".join(f"{k}={v}" for k, v in sorted(p.items()) if k != "fp")
+        return f"{path}?{clean_qs}" if clean_qs else path
+
     return body
 
 
@@ -671,16 +752,42 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
             res["status"] = "OTHER_COUNTRY"
             return res
 
-        # deep Gemini check: final HTTP status must be 200 (not 403 / error
-        # redirect) AND body must be the real app shell without geo-block text
-        rc, gout = curl_run(["-s", "-L", "-m", str(gemini_timeout),
-                             "--socks5-hostname", f"127.0.0.1:{port}",
-                             "-w", "\n__CODE__%{http_code}",
-                             "https://gemini.google.com"], gemini_timeout)
-        body, _, code = gout.rpartition("__CODE__")
-        if (rc == 0 and code.strip() == "200"
+        # deep Gemini check:
+        # - Follow redirects (-L) to app shell or Google sign-in
+        # - Send real browser User-Agent and headers so Google does not serve fallback/sorry
+        # - Capture final effective URL (%{url_effective}) and HTTP code
+        # - Reject if redirected to Google's /sorry/ captcha page or support.google.com
+        # - Body must not contain geo-block or unusual traffic / captcha patterns
+        gemini_cmd = [
+            "-s", "-L", "-m", str(gemini_timeout),
+            "--socks5-hostname", f"127.0.0.1:{port}",
+            "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "-H", "Accept-Language: en-US,en;q=0.9",
+            "-w", "\n__META__%{http_code}__%{url_effective}",
+            "https://gemini.google.com/app"
+        ]
+        rc, gout = curl_run(gemini_cmd, gemini_timeout)
+        body, _, meta = gout.rpartition("__META__")
+        code, _, eff_url = meta.partition("__")
+        code = code.strip()
+        eff_url = eff_url.strip().lower()
+        body_lower = body.lower()
+
+        # Effective URL validation:
+        # Reject Google captcha/sorry or support redirects
+        is_blocked_url = any(b in eff_url for b in ("/sorry/", "sorry.google.com", "support.google.com"))
+
+        # Must land on an allowed Google Gemini / Auth / Consent domain
+        is_valid_domain = any(dom in eff_url for dom in ("gemini.google.com", "accounts.google.com", "consent.google.com"))
+
+        # Must not match any geo-block or captcha/unusual traffic strings
+        has_block_text = any(pat in body_lower for pat in BLOCKED_PATTERNS)
+
+        if (rc == 0 and code == "200"
                 and len(body) > MIN_GEMINI_HTML_LEN
-                and not any(pat in body for pat in BLOCKED_PATTERNS)):
+                and not is_blocked_url
+                and is_valid_domain
+                and not has_block_text):
             res["gemini"] = True
             res["status"] = "PASS_GEMINI"
         else:
