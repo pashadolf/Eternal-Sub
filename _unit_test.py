@@ -72,19 +72,23 @@ safari_link  = 'vless://uuid@srv.com:443?security=tls&fp=safari&sni=srv.com#s'
 unknown_link = 'vless://uuid@srv.com:443?security=tls&fp=randomized&sni=srv.com#r'
 nofp_link    = 'vless://uuid@srv.com:443?security=tls&sni=srv.com#n'
 
-assert tester.fp_priority(chrome_link)  == 0,  tester.fp_priority(chrome_link)
-assert tester.fp_priority(firefox_link) == 1,  tester.fp_priority(firefox_link)
-assert tester.fp_priority(safari_link)  == 2,  tester.fp_priority(safari_link)
-assert tester.fp_priority(unknown_link) > 2,   tester.fp_priority(unknown_link)
-assert tester.fp_priority(nofp_link)    > 2,   tester.fp_priority(nofp_link)
+assert tester.fp_priority(chrome_link)  == (0, 1),  tester.fp_priority(chrome_link)
+assert tester.fp_priority(firefox_link) == (1, 1),  tester.fp_priority(firefox_link)
+assert tester.fp_priority(safari_link)  == (2, 1),  tester.fp_priority(safari_link)
+assert tester.fp_priority(unknown_link) > (2, 1),   tester.fp_priority(unknown_link)
+assert tester.fp_priority(nofp_link)    > (2, 1),   tester.fp_priority(nofp_link)
 
-# Reality beats all (within reality group itself)
+# Reality fp priority: chrome (0, 0) beats firefox (1, 0) and safari (2, 0)
 reality_link = 'vless://uuid@srv.com:443?security=reality&pbk=PK&sni=srv.com&fp=chrome#re'
 reality_ff   = 'vless://uuid@srv.com:443?security=reality&pbk=PK&sni=srv.com&fp=firefox#rf'
-assert tester.fp_priority(reality_link) == -1, tester.fp_priority(reality_link)
-assert tester.fp_priority(reality_ff)   == -1, tester.fp_priority(reality_ff)
+reality_sf   = 'vless://uuid@srv.com:443?security=reality&pbk=PK&sni=srv.com&fp=safari#rs'
+assert tester.fp_priority(reality_link) == (0, 0), tester.fp_priority(reality_link)
+assert tester.fp_priority(reality_ff)   == (1, 0), tester.fp_priority(reality_ff)
+assert tester.fp_priority(reality_sf)   == (2, 0), tester.fp_priority(reality_sf)
+assert tester.fp_priority(reality_link) < tester.fp_priority(reality_ff)
+assert tester.fp_priority(reality_ff) < tester.fp_priority(reality_sf)
 
-# base_signature strips fp= but keeps everything else (same security=tls group)
+# base_signature strips fp= and normalizes params
 assert tester.base_signature(chrome_link) == tester.base_signature(firefox_link)
 assert tester.base_signature(chrome_link) == tester.base_signature(safari_link)
 assert tester.base_signature(chrome_link) == tester.base_signature(nofp_link)
@@ -97,6 +101,11 @@ assert tester.base_signature(chrome_link) != tester.base_signature(other_link)
 plain_tls = 'vless://uuid@srv.com:443?security=tls&fp=chrome&sni=srv.com#c'
 assert tester.base_signature(plain_tls) != tester.base_signature(reality_link)
 
+# Reality IP vs Domain equivalence test (same uuid + port + pbk = same server)
+r_user_ip = 'vless://ad3f4a0a-a89f-498e-9869-a93c8fa185b1@91.107.179.0:10105?flow=xtls-rprx-vision&type=tcp&headerType=none&security=reality&fp=firefox&sni=play.google.com&pbk=PFC3JN1er1JE2vAemwRhNjewz8I4NUWP4XHf2Dza4Es&sid=12e321badd07906e#name1'
+r_user_domain = 'vless://ad3f4a0a-a89f-498e-9869-a93c8fa185b1@germany1.xorsand.eu:10105?flow=xtls-rprx-vision&type=tcp&headerType=none&security=reality&fp=chrome&sni=play.google.com&pbk=PFC3JN1er1JE2vAemwRhNjewz8I4NUWP4XHf2Dza4Es&sid=12e321badd07906e#name2'
+assert tester.base_signature(r_user_ip) == tester.base_signature(r_user_domain)
+
 def _item(link): return {'raw': link, 'name': 'test'}
 
 # chrome wins regardless of insertion order
@@ -108,10 +117,20 @@ result2 = tester.deduplicate_by_fp_priority([_item(safari_link), _item(firefox_l
 assert len(result2) == 1
 assert result2[0]['raw'] == firefox_link, result2[0]['raw']
 
-# reality (fp=chrome priority=-1) beats another reality with fp=firefox (same sig group)
+# In reality group: chrome beats firefox even if firefox is inserted first
 result3 = tester.deduplicate_by_fp_priority([_item(reality_ff), _item(reality_link)])
 assert len(result3) == 1
-assert result3[0]['raw'] == reality_ff, result3[0]['raw']  # first-seen wins when priority equal
+assert result3[0]['raw'] == reality_link, result3[0]['raw']
+
+# Testing exact user case: IP with firefox vs Domain with chrome -> Domain with chrome wins!
+result_user = tester.deduplicate_by_fp_priority([_item(r_user_ip), _item(r_user_domain)])
+assert len(result_user) == 1
+assert result_user[0]['raw'] == r_user_domain, result_user[0]['raw']
+
+# Reverse order test: Domain with chrome first, IP with firefox second -> Domain with chrome wins!
+result_user_rev = tester.deduplicate_by_fp_priority([_item(r_user_domain), _item(r_user_ip)])
+assert len(result_user_rev) == 1
+assert result_user_rev[0]['raw'] == r_user_domain, result_user_rev[0]['raw']
 
 # different servers → both kept
 result4 = tester.deduplicate_by_fp_priority([_item(chrome_link), _item(other_link)])
