@@ -57,5 +57,6 @@ jobs:
             echo "No changes - sub identical to previous run."
           else
             git commit -m "[skip ci] update Github-Gemini sub (xray ${XRAY_VERSION}, $(date -u '+%Y-%m-%d %H:%M') UTC)"
+            git pull --rebase --autostash origin main || true
             git push origin HEAD:main
           fi
