@@ -915,7 +915,7 @@ def main():
             settings = json.load(f)
 
     allowed = set(settings.get("allowed_countries",
-                 ["US", "DE", "NL", "CA", "GB", "FR", "TR", "AE", "CH", "NO", "SG"]))
+                 ["US", "CA", "DE", "FR", "NL", "GB", "CH", "NO", "TR", "AE", "SG", "AU", "NZ", "FI", "SE", "IE", "BE"]))
     workers = args.workers or int(settings.get("workers", 24))
     max_latency = int(settings.get("max_latency_ms", 5000))
     gemini_timeout = int(settings.get("gemini_timeout_s", 6))
