@@ -17,7 +17,9 @@
   "dl_max_secs": 12,
   "up_bytes": 524288,
   "up_max_secs": 10,
-  "allowed_countries": ["US", "DE", "FR", "NL", "GB", "CH", "NO", "TR", "AE", "SG"],
+  "allowed_countries": [
+    "US", "CA", "DE", "FR", "NL", "GB", "CH", "NO", "TR", "AE", "SG", "AU", "NZ", "FI", "SE", "IE", "BE"
+  ],
   "subscription_urls": [
     "https://raw.githubusercontent.com/pourih/pfs-servers-list/refs/heads/main/verified.txt",
     "https://github.com/miladtahanian/V2RayCFGDumper/raw/refs/heads/main/sub.txt",
