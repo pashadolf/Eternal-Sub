@@ -748,6 +748,20 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
         res.update(alive=True, ping=ping, loc=loc.group(1),
                    ip=ip_m.group(1) if ip_m else "")
 
+        # Special Exception for Iran (IR):
+        # Iran configs cannot unlock Gemini, but are kept as a special domestic/intranet/tunnel
+        # utility if they pass the quality battery (keep-alive, download, upload).
+        if res["loc"] == "IR":
+            res["gemini"] = False
+            res["status"] = "PASS_IRAN"
+            if qcfg["enabled"]:
+                q_ok, q_why = quality_battery(port, qcfg, workdir)
+                res["quality_ok"] = q_ok
+                res["q_fail"] = q_why
+                if not q_ok:
+                    res["status"] = "IRAN_QFAIL"
+            return res
+
         if res["loc"] not in allowed:
             res["status"] = "OTHER_COUNTRY"
             return res
@@ -855,8 +869,9 @@ def write_report(path, sub_stats, summary, gemini_ok, started, prefix):
         lines.append(f"- **Quality rejects:** {sum(s['qf'].values())} ({qs}) — "
                      f"ka=keep-alive, jitter, dl=download/speed, up=upload")
     lines.append(f"- **In sub:** **{s['in_sub']}** configs = "
-                 f"**{s['gemini_in_sub']}** \u264aGemini + "
-                 f"**{s['alive_in_sub']}** alive-only "
+                 f"**{s['gemini_in_sub']}** \u264aGemini"
+                 + (f" + **{s['iran_in_sub']}** Iran (\U0001f1ee\U0001f1f7 domestic/tunnel)" if s.get("iran_in_sub") else "")
+                 + f" + **{s['alive_in_sub']}** alive-only "
                  f"(allowed country, no Gemini, passed quality)")
     if s.get("alive_excluded"):
         lines.append(f"- **Excluded alive-only:** {s['alive_excluded']} configs "
@@ -1008,6 +1023,10 @@ def main():
             elif res["status"] == "GEMINI_QFAIL":
                 tprint(f"{tag} QF   {res['loc']} {res['ping']:>5}ms "
                        f"gemini=OK qfail={res['q_fail']}  {name}")
+            elif res["status"] == "PASS_IRAN":
+                tprint(f"{tag} PASS IR {res['ping']:>5}ms iran=OK (quality passed)  {name}")
+            elif res["status"] == "IRAN_QFAIL":
+                tprint(f"{tag} QF   IR {res['ping']:>5}ms iran=FAIL qfail={res['q_fail']}  {name}")
             elif res["status"] == "GEMINI_BLOCKED":
                 tprint(f"{tag} blk  {res['loc']} {res['ping']:>5}ms gemini=NO  {name}")
             elif res["status"] == "OTHER_COUNTRY":
@@ -1025,13 +1044,18 @@ def main():
     # 4. build subscription (quality gate applies to every entry)
     gemini_ok = sorted([r for r in results if r["gemini"] and r["quality_ok"]],
                        key=lambda r: r["ping"])
+    iran_ok = sorted([r for r in results if r["loc"] == "IR" and r["alive"] and r["quality_ok"]],
+                     key=lambda r: r["ping"])
     alive_only = sorted([r for r in results if r["alive"] and not r["gemini"]
-                         and r["loc"] in allowed and r["quality_ok"]],
+                         and r["loc"] in allowed and r["loc"] != "IR" and r["quality_ok"]],
                         key=lambda r: r["ping"])
 
     final_links = []
     for r in gemini_ok:
         final_links.append(rename_link(r["raw"], build_prefix(r["loc"], True)
+                                       + strip_old_prefix(r["name"])))
+    for r in iran_ok:
+        final_links.append(rename_link(r["raw"], build_prefix(r["loc"], False)
                                        + strip_old_prefix(r["name"])))
     if include_alive:
         for r in alive_only:
@@ -1068,6 +1092,7 @@ def main():
         print("  quality rejects: " + "  ".join(
             f"{k}:{v}" for k, v in qf.most_common()))
     print(f"  IN SUB: {len(final_links)} = {len(gemini_ok)} with \u264aGemini"
+          + (f" + {len(iran_ok)} Iran (IR\U0001f1ee\U0001f1f7 domestic)" if iran_ok else "")
           + (f" + {len(alive_only)} alive-only" if include_alive else
              (f"  (+{len(alive_only)} alive-only excluded: "
               f"include_alive_no_gemini=false)" if alive_only else "")))
@@ -1080,6 +1105,7 @@ def main():
         "blocked": blocked,
         "qf": dict(qf),
         "gemini_in_sub": len(gemini_ok),
+        "iran_in_sub": len(iran_ok),
         "alive_in_sub": len(alive_only) if include_alive else 0,
         "alive_excluded": 0 if include_alive else len(alive_only),
         "in_sub": len(final_links),
