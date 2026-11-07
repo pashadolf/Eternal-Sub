@@ -2,7 +2,7 @@ name: Gemini Sub Builder (Github-Gemini)
 
 on:
   schedule:
-    - cron: "30 5 * * *" # daily 09:00 Asia/Tehran (UTC+3:30, no DST in Iran)
+    - cron: "20 5 * * *" # daily ~08:50 Tehran (UTC+3:30), odd minute avoids GitHub Actions :30 queue delays so it runs at ~09:00
   workflow_dispatch:
   push:
     branches: [main]
