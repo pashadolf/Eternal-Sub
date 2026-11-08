@@ -797,14 +797,11 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
         body_lower = body.lower()
 
         # Effective URL validation:
-        # Reject Google captcha/sorry, support redirects, or accounts sign-in redirects.
-        # Note: When Gemini is accessible, it serves the app shell directly at gemini.google.com/app
-        # without 302-redirecting to accounts.google.com. An accounts.google.com redirect indicates
-        # the proxy was blocked from accessing the Gemini app directly or forced into an auth challenge.
-        is_blocked_url = any(b in eff_url for b in ("/sorry/", "sorry.google.com", "support.google.com", "accounts.google.com"))
+        # Reject Google captcha/sorry or support redirects
+        is_blocked_url = any(b in eff_url for b in ("/sorry/", "sorry.google.com", "support.google.com"))
 
-        # Must land on an allowed Google Gemini / Consent domain
-        is_valid_domain = any(dom in eff_url for dom in ("gemini.google.com", "consent.google.com"))
+        # Must land on an allowed Google Gemini / Auth / Consent domain
+        is_valid_domain = any(dom in eff_url for dom in ("gemini.google.com", "accounts.google.com", "consent.google.com"))
 
         # Must not match any geo-block or captcha/unusual traffic strings
         has_block_text = any(pat in body_lower for pat in BLOCKED_PATTERNS)
