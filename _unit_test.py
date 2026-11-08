@@ -208,17 +208,18 @@ assert m_ru and m_ru.group(1).upper() == "RU", m_ru
 assert m_ru.group(1).upper() in tester.UNSUPPORTED_GEMINI_COUNTRIES
 
 # Test blocked URLs
-test_blocked = lambda url: any(b in url for b in ("/sorry/", "sorry.google.com", "support.google.com", "accounts.google.com"))
-assert test_blocked("https://accounts.google.com/InteractiveLogin") is True
+test_blocked = lambda url: any(b in url for b in ("/sorry/", "sorry.google.com", "support.google.com"))
+assert test_blocked("https://accounts.google.com/InteractiveLogin") is False
 assert test_blocked("https://www.google.com/sorry/index?continue=https://gemini.google.com") is True
 assert test_blocked("https://gemini.google.com/app") is False
 assert test_blocked("https://consent.google.com/?continue=https://gemini.google.com") is False
 
 # Test valid landing domains
-test_valid_domain = lambda url: any(dom in url for dom in ("gemini.google.com", "consent.google.com"))
+test_valid_domain = lambda url: any(dom in url for dom in ("gemini.google.com", "accounts.google.com", "consent.google.com"))
 assert test_valid_domain("https://gemini.google.com/app") is True
 assert test_valid_domain("https://consent.google.com/?continue=xyz") is True
-assert test_valid_domain("https://accounts.google.com/v3/signin") is False
+assert test_valid_domain("https://accounts.google.com/v3/signin") is True
+assert test_valid_domain("https://unrelated.com/page") is False
 
 print('Gemini validation & Google GeoIP extraction OK')
 
