@@ -217,4 +217,35 @@ assert is_valid_redirect("https://unrelated-domain.com/path") is False
 
 print('Gemini validation & Google GeoIP extraction OK')
 
+# --- GreyNoise threat filter ---
+item_susp = {'raw': 'vless://u@15.204.97.197:443#susp1', 'ip': '15.204.97.197', 'name': 'susp1'}
+item_clean = {'raw': 'vless://u@51.77.217.70:2053#fr', 'ip': '51.77.217.70', 'name': 'fr'}
+item_noise = {'raw': 'vless://u@107.173.237.146:443#us_noise', 'ip': '107.173.237.146', 'name': 'us_noise'}
+
+ips = tester.extract_candidate_ips(item_susp)
+assert '15.204.97.197' in ips, ips
+
+# Mock query_greynoise_classification to test filter_candidates_by_greynoise logic without network reliance
+orig_query = tester.query_greynoise_classification
+try:
+    mock_db = {
+        '15.204.97.197': 'suspicious',
+        '6.6.6.6': 'malicious',
+        '51.77.217.70': 'clean',
+        '107.173.237.146': 'unknown',
+    }
+    tester.query_greynoise_classification = lambda ip, timeout=4: mock_db.get(ip, 'clean')
+
+    test_cands = [item_susp, item_clean, item_noise, {'raw': 'trojan://p@6.6.6.6:443#mal', 'ip': '6.6.6.6', 'name': 'mal'}]
+    kept, excluded = tester.filter_candidates_by_greynoise(test_cands, {'suspicious', 'malicious'})
+    
+    assert [k['name'] for k in kept] == ['fr', 'us_noise'], f"Unexpected kept: {kept}"
+    assert [x['name'] for x in excluded] == ['susp1', 'mal'], f"Unexpected excluded: {excluded}"
+    assert excluded[0]['greynoise_class'] == 'suspicious'
+    assert excluded[1]['greynoise_class'] == 'malicious'
+finally:
+    tester.query_greynoise_classification = orig_query
+
+print('GreyNoise threat filter OK')
+
 print('ALL UNIT TESTS PASSED')
