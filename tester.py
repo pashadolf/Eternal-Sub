@@ -853,6 +853,91 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
             pass
 
 
+# ---------------------------------------------------------------- greynoise
+
+def extract_candidate_ips(r):
+    ips = set()
+    egress_ip = r.get("ip", "")
+    if egress_ip and re.match(r"^\d+\.\d+\.\d+\.\d+$", egress_ip):
+        ips.add(egress_ip)
+    m = re.search(r"@([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):", r.get("raw", ""))
+    if m:
+        ips.add(m.group(1))
+    return ips
+
+
+def query_greynoise_classification(ip, timeout=4):
+    """
+    Query GreyNoise Community API for IP threat intelligence.
+    Returns: 'clean', 'unknown', 'benign', 'suspicious', 'malicious', or 'error'
+    """
+    if not ip or not re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
+        return "clean"
+    url = f"https://api.greynoise.io/v3/community/{ip}"
+    req = urllib.request.Request(url, headers={"User-Agent": "curl/8.2.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("classification", "unknown").lower()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "clean"  # 404 = IP not observed scanning the internet
+        return "error"
+    except Exception:
+        return "error"
+
+
+def filter_candidates_by_greynoise(candidates, blocked_classes, max_workers=5):
+    """
+    Check egress and server IPs of candidate configs against GreyNoise Community API.
+    Drops candidates whose IP classification is in blocked_classes (e.g. {'suspicious', 'malicious'}).
+    Fails-open on API errors or timeouts (never drops when GreyNoise is unreachable).
+    Returns: (kept_candidates, excluded_candidates)
+    """
+    if not candidates or not blocked_classes:
+        return list(candidates), []
+
+    cand_ips = {}
+    all_ips = set()
+    for r in candidates:
+        ips = extract_candidate_ips(r)
+        cand_ips[id(r)] = ips
+        all_ips.update(ips)
+
+    unique_ips = sorted(list(all_ips))
+    if not unique_ips:
+        return list(candidates), []
+
+    ip_classifications = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(unique_ips))) as ex:
+        futs = {ex.submit(query_greynoise_classification, ip): ip for ip in unique_ips}
+        for fut in futs:
+            ip = futs[fut]
+            try:
+                ip_classifications[ip] = fut.result()
+            except Exception:
+                ip_classifications[ip] = "error"
+
+    kept = []
+    excluded = []
+    for r in candidates:
+        ips = cand_ips.get(id(r), set())
+        bad_class = None
+        for ip in ips:
+            cls = ip_classifications.get(ip, "clean")
+            if cls in blocked_classes:
+                bad_class = (cls, ip)
+                break
+        if bad_class:
+            r["greynoise_class"] = bad_class[0]
+            r["greynoise_ip"] = bad_class[1]
+            excluded.append(r)
+        else:
+            kept.append(r)
+
+    return kept, excluded
+
+
 # ---------------------------------------------------------------- report
 
 def sub_short_name(url):
@@ -890,6 +975,9 @@ def write_report(path, sub_stats, summary, gemini_ok, started, prefix):
                        sorted(s["qf"].items(), key=lambda x: -x[1]))
         lines.append(f"- **Quality rejects:** {sum(s['qf'].values())} ({qs}) — "
                      f"ka=keep-alive, jitter, dl=download/speed, up=upload")
+    if s.get("gn_excluded"):
+        lines.append(f"- **GreyNoise excluded:** {s['gn_excluded']} configs "
+                     f"(super-noisy / suspicious / malicious scanner IPs filtered out)")
     lines.append(f"- **In sub:** **{s['in_sub']}** configs = "
                  f"**{s['gemini_in_sub']}** \u264aGemini"
                  + (f" + **{s['iran_in_sub']}** Iran (\U0001f1ee\U0001f1f7 domestic/tunnel)" if s.get("iran_in_sub") else "")
@@ -961,6 +1049,8 @@ def main():
     budget_min = float(settings.get("runtime_budget_min", 90))
     include_alive = bool(settings.get("include_alive_no_gemini", True))
     require_fp = bool(settings.get("require_fingerprint", False))
+    gn_enabled = bool(settings.get("greynoise_filter", True))
+    gn_blocked = set(c.lower() for c in settings.get("greynoise_block_classifications", ["suspicious", "malicious"]))
     qcfg = {
         "enabled":        bool(settings.get("quality_test", True)),
         "ka_requests":    int(settings.get("ka_requests", 6)),
@@ -1074,6 +1164,27 @@ def main():
                          and r["loc"] in allowed and r["loc"] != "IR" and r["quality_ok"]],
                         key=lambda r: r["ping"])
 
+    # GreyNoise threat intelligence filter (drop suspicious/malicious scanner IPs)
+    gn_excluded = []
+    if gn_enabled and gn_blocked:
+        candidates = gemini_ok + iran_ok + (alive_only if include_alive else [])
+        if candidates:
+            print()
+            print(f"[*] Checking GreyNoise threat intelligence for {len(candidates)} candidates "
+                  f"(blocking: {', '.join(sorted(gn_blocked))})...")
+            _, gn_excluded = filter_candidates_by_greynoise(candidates, gn_blocked)
+            if gn_excluded:
+                excluded_ids = {id(r) for r in gn_excluded}
+                gemini_ok = [r for r in gemini_ok if id(r) not in excluded_ids]
+                iran_ok = [r for r in iran_ok if id(r) not in excluded_ids]
+                alive_only = [r for r in alive_only if id(r) not in excluded_ids]
+                print(f"[-] GreyNoise excluded {len(gn_excluded)} configs (suspicious/malicious scanner noise):")
+                for ex in gn_excluded:
+                    ip_disp = ex.get("greynoise_ip") or ex.get("ip") or "unknown"
+                    print(f"    - [{ex.get('greynoise_class', '').upper()}] {ip_disp:15} | {ex.get('loc', '??')} | {ex.get('name', '')}")
+            else:
+                print("[+] All sub candidates passed GreyNoise threat check!")
+
     final_links = []
     for r in gemini_ok:
         final_links.append(rename_link(r["raw"], build_prefix(r["loc"], True)
@@ -1115,6 +1226,8 @@ def main():
     if qf:
         print("  quality rejects: " + "  ".join(
             f"{k}:{v}" for k, v in qf.most_common()))
+    if gn_excluded:
+        print(f"  greynoise rejects: {len(gn_excluded)} (suspicious/malicious scanner noise)")
     print(f"  IN SUB: {len(final_links)} = {len(gemini_ok)} with \u264aGemini"
           + (f" + {len(iran_ok)} Iran (IR\U0001f1ee\U0001f1f7 domestic)" if iran_ok else "")
           + (f" + {len(alive_only)} alive-only" if include_alive else
@@ -1128,6 +1241,7 @@ def main():
         "raw_gemini": raw_gemini,
         "blocked": blocked,
         "qf": dict(qf),
+        "gn_excluded": len(gn_excluded),
         "gemini_in_sub": len(gemini_ok),
         "iran_in_sub": len(iran_ok),
         "alive_in_sub": len(alive_only) if include_alive else 0,
