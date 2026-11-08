@@ -2,7 +2,7 @@
   "workers": 32,
   "base_port": 28100,
   "max_latency_ms": 5000,
-  "gemini_timeout_s": 6,
+  "gemini_timeout_s": 8,
   "max_configs": 20000,
   "runtime_budget_min": 90,
   "include_alive_no_gemini": false,
