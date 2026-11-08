@@ -7,6 +7,11 @@
   "runtime_budget_min": 90,
   "include_alive_no_gemini": false,
   "require_fingerprint": true,
+  "greynoise_filter": true,
+  "greynoise_block_classifications": [
+    "suspicious",
+    "malicious"
+  ],
   "quality_test": true,
   "ka_requests": 6,
   "ka_req_timeout": 2,
