@@ -191,4 +191,35 @@ winner_fp = _json.loads(tester.b64_decode(after_p2[0]['raw'][8:]))['fp']
 assert winner_fp == 'chrome', f'chrome should win, got {winner_fp}'
 print('vmess fp-aware dedup_signature OK')
 
+# --- Gemini validation & Google GeoIP extraction ---
+import re
+
+for bad_c in ("RU", "IR", "CN", "KP", "CU", "SY", "BY"):
+    assert bad_c in tester.UNSUPPORTED_GEMINI_COUNTRIES, f"{bad_c} missing from UNSUPPORTED_GEMINI_COUNTRIES"
+
+# Test vXmutd regex extraction
+sample_html_us = 'window.WIZ_global_data={"cfb2h":"boq","vXmutd":"%.@.\\"US\\",\\"ZZ\\",\\"Kg8nRoABeiVDD0wKMg9W6w\\\\u003d\\\\"}'
+m_us = re.search(r'["\']vXmutd["\']\s*:\s*["\']%\.@\.\\?["\']([A-Z]{2})\\?["\']', sample_html_us)
+assert m_us and m_us.group(1).upper() == "US", m_us
+
+sample_html_ru = '{"vXmutd":"%.@.\\"RU\\",\\"ZZ\\""}'
+m_ru = re.search(r'["\']vXmutd["\']\s*:\s*["\']%\.@\.\\?["\']([A-Z]{2})\\?["\']', sample_html_ru)
+assert m_ru and m_ru.group(1).upper() == "RU", m_ru
+assert m_ru.group(1).upper() in tester.UNSUPPORTED_GEMINI_COUNTRIES
+
+# Test blocked URLs
+test_blocked = lambda url: any(b in url for b in ("/sorry/", "sorry.google.com", "support.google.com", "accounts.google.com"))
+assert test_blocked("https://accounts.google.com/InteractiveLogin") is True
+assert test_blocked("https://www.google.com/sorry/index?continue=https://gemini.google.com") is True
+assert test_blocked("https://gemini.google.com/app") is False
+assert test_blocked("https://consent.google.com/?continue=https://gemini.google.com") is False
+
+# Test valid landing domains
+test_valid_domain = lambda url: any(dom in url for dom in ("gemini.google.com", "consent.google.com"))
+assert test_valid_domain("https://gemini.google.com/app") is True
+assert test_valid_domain("https://consent.google.com/?continue=xyz") is True
+assert test_valid_domain("https://accounts.google.com/v3/signin") is False
+
+print('Gemini validation & Google GeoIP extraction OK')
+
 print('ALL UNIT TESTS PASSED')
