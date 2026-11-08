@@ -32,15 +32,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install Xray Core (latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VER=$(curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r .tag_name)
-          if [ -z "$VER" ] || [ "$VER" = "null" ]; then
-            VER="v26.10.31"
-          fi
+          gh release download --repo XTLS/Xray-core -p "Xray-linux-64.zip" -D /tmp --clobber
+          VER=$(gh release view --repo XTLS/Xray-core --json tagName -q .tagName)
           echo "XRAY_VERSION=$VER" >> "$GITHUB_ENV"
           echo "xray version: $VER"
-          curl -sSfL --retry 5 --retry-connrefused --retry-delay 2 -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${VER}/Xray-linux-64.zip"
-          unzip -o /tmp/xray.zip xray -d ./bin
+          unzip -o /tmp/Xray-linux-64.zip xray -d ./bin
           chmod +x ./bin/xray
           ./bin/xray version
 
