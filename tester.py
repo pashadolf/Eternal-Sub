@@ -43,18 +43,9 @@ BLOCKED_PATTERNS = (
     "unsupported country",
     "unsupported location",
     "unsupported region",
-    "stay tuned",
     "service not available in your country",
     "not available in your region",
     "isn't available in your region",
-    "unusual traffic from your computer network",
-    "unusual traffic",
-    "detected unusual traffic",
-    "systems have detected unusual traffic",
-    "google.com/sorry",
-    "/sorry/index",
-    "recaptcha",
-    "automated queries",
 )
 UNSUPPORTED_GEMINI_COUNTRIES = frozenset({
     "RU", "IR", "CN", "KP", "CU", "SY", "BY",
@@ -776,34 +767,35 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
             return res
 
         # deep Gemini check:
-        # - Follow redirects (-L) to app shell or Google sign-in
-        # - Send real browser User-Agent and headers so Google does not serve fallback/sorry
-        # - Capture final effective URL (%{url_effective}) and HTTP code
-        # - Reject if redirected to Google's /sorry/ captcha page or support.google.com
-        # - Body must not contain geo-block or unusual traffic / captcha patterns
+        # Request gemini.google.com/app with -i (include response headers) without -L.
+        # Avoiding -L prevents curl from getting stuck/timed out on Google's /sorry/ captcha page.
+        # - HTTP 200: Direct app shell. We check body size, geo-block text, and vXmutd country.
+        # - HTTP 301/302/303/307: Redirect to accounts.google.com, consent.google.com, or sorry.
+        #   If it redirects to a valid Google domain (and NOT support.google.com), it's a valid node!
         gemini_cmd = [
-            "-s", "-L", "-m", str(gemini_timeout),
+            "-s", "-i", "-m", str(gemini_timeout),
             "--socks5-hostname", f"127.0.0.1:{port}",
             "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
             "-H", "Accept-Language: en-US,en;q=0.9",
-            "-w", "\n__META__%{http_code}__%{url_effective}",
             "https://gemini.google.com/app"
         ]
         rc, gout = curl_run(gemini_cmd, gemini_timeout)
-        body, _, meta = gout.rpartition("__META__")
-        code, _, eff_url = meta.partition("__")
-        code = code.strip()
-        eff_url = eff_url.strip().lower()
+        header_text, _, body = gout.partition("\r\n\r\n")
+        if not body:
+            header_text, _, body = gout.partition("\n\n")
+
+        lines = header_text.splitlines()
+        status_line = lines[0] if lines else ""
+        code_match = re.search(r"HTTP/\S+\s+(\d+)", status_line)
+        code = code_match.group(1) if code_match else ""
+
+        loc_header = ""
+        for l in lines:
+            if l.lower().startswith("location:"):
+                loc_header = l.partition(":")[2].strip().lower()
+                break
+
         body_lower = body.lower()
-
-        # Effective URL validation:
-        # Reject Google captcha/sorry or support redirects
-        is_blocked_url = any(b in eff_url for b in ("/sorry/", "sorry.google.com", "support.google.com"))
-
-        # Must land on an allowed Google Gemini / Auth / Consent domain
-        is_valid_domain = any(dom in eff_url for dom in ("gemini.google.com", "accounts.google.com", "consent.google.com"))
-
-        # Must not match any geo-block or captcha/unusual traffic strings
         has_block_text = any(pat in body_lower for pat in BLOCKED_PATTERNS)
 
         # Extract Google's actual detected country code from WIZ_global_data
@@ -820,12 +812,18 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
             if google_loc in UNSUPPORTED_GEMINI_COUNTRIES or google_loc not in allowed:
                 google_geo_ok = False
 
-        if (rc == 0 and code == "200"
-                and len(body) > MIN_GEMINI_HTML_LEN
-                and not is_blocked_url
-                and is_valid_domain
-                and not has_block_text
-                and google_geo_ok):
+        gemini_pass = False
+        if rc == 0 and google_geo_ok and not has_block_text:
+            if code == "200" and len(body) > MIN_GEMINI_HTML_LEN:
+                gemini_pass = True
+            elif code in ("301", "302", "303", "307"):
+                # Must NOT redirect to support.google.com (unsupported region article)
+                # and must target a legitimate Google domain (accounts, consent, sorry, gemini)
+                if ("support.google.com" not in loc_header and
+                        any(dom in loc_header for dom in ("gemini.google.com", "accounts.google.com", "consent.google.com", "google.com"))):
+                    gemini_pass = True
+
+        if gemini_pass:
             res["gemini"] = True
             res["status"] = "PASS_GEMINI"
         else:
