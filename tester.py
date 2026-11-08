@@ -42,6 +42,11 @@ BLOCKED_PATTERNS = (
     "location is not supported",
     "unsupported country",
     "unsupported location",
+    "unsupported region",
+    "stay tuned",
+    "service not available in your country",
+    "not available in your region",
+    "isn't available in your region",
     "unusual traffic from your computer network",
     "unusual traffic",
     "detected unusual traffic",
@@ -51,6 +56,9 @@ BLOCKED_PATTERNS = (
     "recaptcha",
     "automated queries",
 )
+UNSUPPORTED_GEMINI_COUNTRIES = frozenset({
+    "RU", "IR", "CN", "KP", "CU", "SY", "BY",
+})
 MIN_GEMINI_HTML_LEN = 2500
 XRAY_CANDIDATES_WIN = [
     r"C:\Program Files\FlyFrogLLC\Happ\core\xray.exe",
@@ -713,7 +721,7 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
     if outbound is None:
         return {**item, "alive": False, "status": "UNSUPPORTED", "ping": 0,
                 "loc": "", "ip": "", "gemini": False, "quality_ok": True,
-                "q_fail": ""}
+                "q_fail": "", "google_loc": ""}
 
     cfg = {
         "log": {"loglevel": "none"},
@@ -726,7 +734,8 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
 
     trace_t = max(3, int(round(max_latency_ms / 1000)))
     res = {**item, "alive": False, "status": "DEAD", "ping": 0, "loc": "",
-           "ip": "", "gemini": False, "quality_ok": True, "q_fail": ""}
+           "ip": "", "gemini": False, "quality_ok": True, "q_fail": "",
+           "google_loc": ""}
     proc = None
     try:
         proc = subprocess.Popen([xray_path, "run", "-c", cfg_path],
@@ -788,20 +797,38 @@ def test_config(xray_path, item, base_port, max_latency_ms, allowed,
         body_lower = body.lower()
 
         # Effective URL validation:
-        # Reject Google captcha/sorry or support redirects
-        is_blocked_url = any(b in eff_url for b in ("/sorry/", "sorry.google.com", "support.google.com"))
+        # Reject Google captcha/sorry, support redirects, or accounts sign-in redirects.
+        # Note: When Gemini is accessible, it serves the app shell directly at gemini.google.com/app
+        # without 302-redirecting to accounts.google.com. An accounts.google.com redirect indicates
+        # the proxy was blocked from accessing the Gemini app directly or forced into an auth challenge.
+        is_blocked_url = any(b in eff_url for b in ("/sorry/", "sorry.google.com", "support.google.com", "accounts.google.com"))
 
-        # Must land on an allowed Google Gemini / Auth / Consent domain
-        is_valid_domain = any(dom in eff_url for dom in ("gemini.google.com", "accounts.google.com", "consent.google.com"))
+        # Must land on an allowed Google Gemini / Consent domain
+        is_valid_domain = any(dom in eff_url for dom in ("gemini.google.com", "consent.google.com"))
 
         # Must not match any geo-block or captcha/unusual traffic strings
         has_block_text = any(pat in body_lower for pat in BLOCKED_PATTERNS)
+
+        # Extract Google's actual detected country code from WIZ_global_data
+        # Format in Gemini web app HTML: "vXmutd":"%.@.\"US\",\"ZZ\",..."
+        g_loc_match = re.search(r'["\']vXmutd["\']\s*:\s*["\']%\.@\.\\?["\']([A-Z]{2})\\?["\']', body)
+        google_loc = g_loc_match.group(1).upper() if g_loc_match else ""
+        res["google_loc"] = google_loc
+
+        # Google detected country validation:
+        # 1. Must NOT be an unsupported/sanctioned Gemini country (RU, IR, CN, KP, CU, SY, BY)
+        # 2. If google_loc is detected, it must be in the allowed_countries list
+        google_geo_ok = True
+        if google_loc:
+            if google_loc in UNSUPPORTED_GEMINI_COUNTRIES or google_loc not in allowed:
+                google_geo_ok = False
 
         if (rc == 0 and code == "200"
                 and len(body) > MIN_GEMINI_HTML_LEN
                 and not is_blocked_url
                 and is_valid_domain
-                and not has_block_text):
+                and not has_block_text
+                and google_geo_ok):
             res["gemini"] = True
             res["status"] = "PASS_GEMINI"
         else:
@@ -1018,8 +1045,9 @@ def main():
             results.append(res)
             name = res["name"][:38]
             tag = f"[{done}/{len(items)}]"
+            g_hint = f" (Google:{res['google_loc']})" if res.get("google_loc") and res["google_loc"] != res["loc"] else ""
             if res["status"] == "PASS_GEMINI":
-                tprint(f"{tag} PASS {res['loc']} {res['ping']:>5}ms gemini=OK  {name}")
+                tprint(f"{tag} PASS {res['loc']} {res['ping']:>5}ms gemini=OK{g_hint}  {name}")
             elif res["status"] == "GEMINI_QFAIL":
                 tprint(f"{tag} QF   {res['loc']} {res['ping']:>5}ms "
                        f"gemini=OK qfail={res['q_fail']}  {name}")
@@ -1028,7 +1056,8 @@ def main():
             elif res["status"] == "IRAN_QFAIL":
                 tprint(f"{tag} QF   IR {res['ping']:>5}ms iran=FAIL qfail={res['q_fail']}  {name}")
             elif res["status"] == "GEMINI_BLOCKED":
-                tprint(f"{tag} blk  {res['loc']} {res['ping']:>5}ms gemini=NO  {name}")
+                blk_hint = f" (Google:{res['google_loc']})" if res.get("google_loc") else ""
+                tprint(f"{tag} blk  {res['loc']} {res['ping']:>5}ms gemini=NO{blk_hint}  {name}")
             elif res["status"] == "OTHER_COUNTRY":
                 tprint(f"{tag} skip {res['loc']:>2} {res['ping']:>5}ms           {name}")
             elif res["alive"]:
